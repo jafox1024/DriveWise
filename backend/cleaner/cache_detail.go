@@ -1,0 +1,175 @@
+package cleaner
+
+import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"drivewise/backend/internal/fsutil"
+	"drivewise/backend/models"
+)
+
+const detailItemLimit = 200 // 每个路径最多展示的顶层条目数
+
+// ScanCacheDetails 查看指定缓存分类的详细内容（各路径顶层条目，按大小降序）
+func (c *CacheService) ScanCacheDetails(categoryName string) []models.CacheDetailPath {
+	for _, def := range defaultCategories() {
+		if def.name != categoryName {
+			continue
+		}
+		// 智能识别型：返回升级残留专项扫描结果
+		if def.special {
+			return scanUpgradeResidue()
+		}
+		paths := resolvePaths(def.paths)
+		details := make([]models.CacheDetailPath, 0, len(paths))
+		for _, p := range paths {
+			res := scanPath(p)
+			detail := models.CacheDetailPath{
+				Path:      p,
+				Size:      res.Size,
+				FileCount: res.FileCount,
+			}
+			if res.Exists && res.Size > 0 {
+				detail.Items = listTopItems(p, detailItemLimit)
+			}
+			details = append(details, detail)
+		}
+		return details
+	}
+	return nil
+}
+
+// CleanCacheItems 针对性清理：删除勾选的具体条目（文件或整个目录）
+func (c *CacheService) CleanCacheItems(categoryName string, itemPaths []string) models.CleanResult {
+	res := models.CleanResult{Category: categoryName}
+
+	for _, def := range defaultCategories() {
+		if def.name != categoryName {
+			continue
+		}
+		// 智能识别型：白名单 = 实时扫描出的残留项路径（精确匹配，保护最新版本）
+		if def.special {
+			valid := upgradeItemPaths()
+			for _, p := range itemPaths {
+				if !valid[p] {
+					res.Errors = append(res.Errors, p+": 不在可清理的升级残留列表中，已拒绝")
+					continue
+				}
+				freed, err := removePath(p)
+				if err != nil {
+					res.Errors = append(res.Errors, p+": "+err.Error())
+					continue
+				}
+				res.FreedBytes += freed
+				res.FileCount++
+			}
+			return res
+		}
+		// 常规分类：白名单 = 解析路径集合
+		roots := resolvePaths(def.paths)
+		if len(roots) == 0 {
+			res.Errors = append(res.Errors, "未找到缓存分类: "+categoryName)
+			return res
+		}
+		for _, p := range itemPaths {
+			if !isWithinRoots(p, roots) {
+				res.Errors = append(res.Errors, p+": 路径超出分类范围，已拒绝")
+				continue
+			}
+			freed, err := removePath(p)
+			if err != nil {
+				res.Errors = append(res.Errors, p+": "+err.Error())
+				continue
+			}
+			res.FreedBytes += freed
+			res.FileCount++
+		}
+		return res
+	}
+	res.Errors = append(res.Errors, "未找到缓存分类: "+categoryName)
+	return res
+}
+
+// listTopItems 列出目录顶层条目，按大小降序，最多 limit 个（跳过符号链接）
+// 条目大小计算采用并��方式，提升大目录详情加载速度
+func listTopItems(dir string, limit int) []models.CacheDetailItem {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	items := make([]models.CacheDetailItem, 0, len(entries))
+	for _, e := range entries {
+		full := filepath.Join(dir, e.Name())
+		if e.Type()&fs.ModeSymlink != 0 {
+			continue // 不展示联接，避免误删真实数据
+		}
+		items = append(items, models.CacheDetailItem{
+			Name:  e.Name(),
+			Path:  full,
+			IsDir: e.IsDir(),
+		})
+	}
+
+	// 并发计算每个条目的大小与修改时间
+	const w = 8
+	sem := make(chan struct{}, w)
+	var wg sync.WaitGroup
+	for i := range items {
+		i := i
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			it := &items[i]
+			if info, ierr := os.Lstat(it.Path); ierr == nil {
+				it.ModTime = info.ModTime().Format(time.DateTime)
+				if !it.IsDir {
+					it.Size = info.Size()
+				}
+			}
+			if it.IsDir {
+				it.Size, _ = fsutil.DirSize(it.Path, 0)
+			}
+		}()
+	}
+	wg.Wait()
+
+	sort.Slice(items, func(i, j int) bool { return items[i].Size > items[j].Size })
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
+}
+
+// isWithinRoots 校验路径是否位于任一允许根目录之下（禁止删除根本身，大小写不敏感）
+func isWithinRoots(p string, roots []string) bool {
+	ap, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	ap = strings.TrimRight(ap, `\/`)
+	for _, r := range roots {
+		ar, err := filepath.Abs(r)
+		if err != nil {
+			continue
+		}
+		ar = strings.TrimRight(ar, `\/`)
+		if strings.EqualFold(ap, ar) {
+			continue // 不允许删除根路径本身
+		}
+		rel, err := filepath.Rel(ar, ap)
+		if err != nil {
+			continue
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}

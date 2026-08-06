@@ -1,0 +1,3 @@
+\redis-server.exe
+\mysqld.exe
+\esif_assist_64.exe

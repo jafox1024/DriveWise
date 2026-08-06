@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0EA5E9"/>
+      <stop offset="100%" stop-color="#2563EB"/>
+    </linearGradient>
+    <radialGradient id="diskGrad" cx="50%" cy="45%" r="55%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E0F2FE"/>
+    </radialGradient>
+    <linearGradient id="sweepGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect width="1024" height="1024" rx="224" ry="224" fill="url(#bgGrad)"/>
+
+  <!-- Subtle radar sweep (top-right quadrant) -->
+  <path d="M 512 512 L 512 172 A 340 340 0 0 1 806 407 Z" fill="url(#sweepGrad)"/>
+
+  <!-- Outer platter ring -->
+  <circle cx="512" cy="512" r="340" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-opacity="0.22"/>
+
+  <!-- Middle platter ring -->
+  <circle cx="512" cy="512" r="270" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-opacity="0.14"/>
+
+  <!-- Inner disk platter -->
+  <circle cx="512" cy="512" r="210" fill="url(#diskGrad)"/>
+
+  <!-- Platter center hub -->
+  <circle cx="512" cy="512" r="28" fill="#2563EB" fill-opacity="0.12"/>
+
+  <!-- Checkmark (Wise = clean / optimized) -->
+  <path d="M 398 516 L 476 594 L 642 406" fill="none" stroke="#2563EB" stroke-width="52" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Data scan dots -->
+  <circle cx="700" cy="330" r="9" fill="#FFFFFF" fill-opacity="0.55"/>
+  <circle cx="755" cy="430" r="6" fill="#FFFFFF" fill-opacity="0.35"/>
+  <circle cx="665" cy="245" r="5" fill="#FFFFFF" fill-opacity="0.25"/>
+</svg>
