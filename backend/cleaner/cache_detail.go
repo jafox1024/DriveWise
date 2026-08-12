@@ -25,6 +25,30 @@ func (c *CacheService) ScanCacheDetails(categoryName string) []models.CacheDetai
 		if def.special {
 			return scanUpgradeResidue()
 		}
+		// 文件级模式：每个匹配文件作为一条详情
+		if len(def.filePatterns) > 0 {
+			files := resolveFilePatterns(def.filePatterns)
+			details := make([]models.CacheDetailPath, 0, len(files))
+			for _, f := range files {
+				info, err := os.Lstat(f)
+				if err != nil {
+					continue
+				}
+				details = append(details, models.CacheDetailPath{
+					Path:      f,
+					Size:      info.Size(),
+					FileCount: 1,
+					Items: []models.CacheDetailItem{{
+						Name:    filepath.Base(f),
+						Path:    f,
+						Size:    info.Size(),
+						IsDir:   false,
+						ModTime: info.ModTime().Format(time.DateTime),
+					}},
+				})
+			}
+			return details
+		}
 		paths := resolvePaths(def.paths)
 		details := make([]models.CacheDetailPath, 0, len(paths))
 		for _, p := range paths {
@@ -58,6 +82,27 @@ func (c *CacheService) CleanCacheItems(categoryName string, itemPaths []string) 
 			for _, p := range itemPaths {
 				if !valid[p] {
 					res.Errors = append(res.Errors, p+": 不在可清理的升级残留列表中，已拒绝")
+					continue
+				}
+				freed, err := removePath(p)
+				if err != nil {
+					res.Errors = append(res.Errors, p+": "+err.Error())
+					continue
+				}
+				res.FreedBytes += freed
+				res.FileCount++
+			}
+			return res
+		}
+		// 文件级模式：白名单 = 实时匹配出的文件路径（精确匹配，不碰目录本身）
+		if len(def.filePatterns) > 0 {
+			valid := make(map[string]bool)
+			for _, f := range resolveFilePatterns(def.filePatterns) {
+				valid[f] = true
+			}
+			for _, p := range itemPaths {
+				if !valid[p] {
+					res.Errors = append(res.Errors, p+": 不在可清理的缓存文件列表中，已拒绝")
 					continue
 				}
 				freed, err := removePath(p)

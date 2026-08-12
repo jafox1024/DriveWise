@@ -16,14 +16,17 @@ type CacheService struct{}
 
 // cacheCategoryDef 缓存分类定义（模板）
 type cacheCategoryDef struct {
-	name     string   // 分类名
-	paths    []string // 路径模板，支持 %ENV% 与通配符 *（仅用于 User Data 等目录）
-	selected bool     // 默认选中
-	special  bool     // 智能识别型（升级残留等，需专用扫描逻辑）
-	desc     string   // 分类说明
+	name         string   // 分类名
+	paths        []string // 路径模板，支持 %ENV% 与通配符 *（仅用于 User Data 等目录）
+	filePatterns []string // 文件级模式（仅匹配指定文件，如 thumbcache_*.db），优先于 paths
+	selected     bool     // 默认选中
+	special      bool     // 智能识别型（升级残留等，需专用扫描逻辑）
+	admin        bool     // 需管理员权限（系统级目录）
+	desc         string   // 分类说明
 }
 
 // defaultCategories 返回内置缓存分类定义
+// 参考 DISM++ 空间回收功能分类整理
 func defaultCategories() []cacheCategoryDef {
 	localAppData := os.Getenv("LOCALAPPDATA")
 	appData := os.Getenv("APPDATA")
@@ -42,15 +45,41 @@ func defaultCategories() []cacheCategoryDef {
 		},
 		{
 			name: "Windows 更新缓存",
-			desc: "Windows 更新下载的安装包缓存，清理后不影响已安装的更新",
+			desc: "Windows 更新下载的安装包与更新日志缓存，清理后不影响已安装的更新",
 			paths: []string{
 				`C:\Windows\SoftwareDistribution\Download`,
+				`C:\Windows\SoftwareDistribution\DataStore\Logs`,
 			},
+			admin:    true,
 			selected: true,
 		},
 		{
+			name: "系统日志与错误报告",
+			desc: "Windows 系统日志（CBS/DISM/WER 等）与崩溃转储，日常使用无用，可安全清理",
+			paths: []string{
+				`C:\Windows\Logs\CBS`,
+				`C:\Windows\Logs\DISM`,
+				`C:\Windows\System32\LogFiles`,
+				`C:\Windows\Minidump`,
+				`%PROGRAMDATA%\Microsoft\Windows\WER\ReportArchive`,
+				`%PROGRAMDATA%\Microsoft\Windows\WER\ReportQueue`,
+			},
+			admin:    true,
+			selected: false,
+		},
+		{
+			name: "传递优化缓存",
+			desc: "Windows 更新加速下载的 Delivery Optimization 缓存，清理后不影响系统，更新会重新下载",
+			paths: []string{
+				`C:\Windows\SoftwareDistribution\DeliveryOptimization`,
+				`%PROGRAMDATA%\Microsoft\Windows\DeliveryOptimization\Cache`,
+			},
+			admin:    true,
+			selected: false,
+		},
+		{
 			name: "浏览器缓存",
-			desc: "Chrome/Edge 的网页与 GPU 缓存，清理后网页首次访问会稍慢，不影响登录状态",
+			desc: "Chrome/Edge/Firefox 的网页与 GPU 缓存，清理后网页首次访问会稍慢，不影响登录状态",
 			paths: []string{
 				localAppData + `\Google\Chrome\User Data\*\Cache`,
 				localAppData + `\Google\Chrome\User Data\*\Code Cache`,
@@ -58,8 +87,29 @@ func defaultCategories() []cacheCategoryDef {
 				localAppData + `\Microsoft\Edge\User Data\*\Cache`,
 				localAppData + `\Microsoft\Edge\User Data\*\Code Cache`,
 				localAppData + `\Microsoft\Edge\User Data\*\GPUCache`,
+				localAppData + `\Mozilla\Firefox\Profiles\*\cache2`,
+				localAppData + `\Mozilla\Firefox\Profiles\*\startupCache`,
 			},
 			selected: true,
+		},
+		{
+			name: "缩略图与图标缓存",
+			desc: "文件资源管理器生成的缩略图/图标缓存（thumbcache/iconcache），自动重建，可安全清理",
+			filePatterns: []string{
+				localAppData + `\Microsoft\Windows\Explorer\thumbcache_*.db`,
+				localAppData + `\Microsoft\Windows\Explorer\iconcache_*.db`,
+			},
+			selected: true,
+		},
+		{
+			name: "字体缓存",
+			desc: "系统字体服务缓存，重建后自动重新生成，可安全清理",
+			paths: []string{
+				`C:\Windows\ServiceProfiles\LocalService\AppData\Local\FontCache`,
+				`C:\Windows\System32\FNTCACHE.DAT`,
+			},
+			admin:    true,
+			selected: false,
 		},
 		{
 			name: "开发工具缓存",
@@ -78,6 +128,17 @@ func defaultCategories() []cacheCategoryDef {
 			selected: false,
 		},
 		{
+			name: "微软商店与应用缓存",
+			desc: "Microsoft Store 与 UWP 应用的临时缓存（INetCache/AC/TempState），清理后应用重新加载",
+			paths: []string{
+				localAppData + `\Packages\*\AC\INetCache`,
+				localAppData + `\Packages\*\AC\Temp`,
+				localAppData + `\Packages\*\TempState`,
+				localAppData + `\Packages\Microsoft.WindowsStore_*\LocalCache`,
+			},
+			selected: false,
+		},
+		{
 			name: "崩溃转储文件",
 			desc: "程序崩溃时生成的诊断文件，对日常使用无用，可安全清理",
 			paths: []string{
@@ -92,7 +153,6 @@ func defaultCategories() []cacheCategoryDef {
 			paths: []string{
 				appData + `\Microsoft\Windows\Recent`,
 				localAppData + `\D3DSCache`,
-				localAppData + `\Microsoft\Windows\Explorer`,
 			},
 			selected: false,
 		},
@@ -148,9 +208,11 @@ func (c *CacheService) ScanCache() []models.CacheCategory {
 			Name:     def.name,
 			Selected: def.selected,
 			Special:  def.special,
+			Admin:    def.admin,
 			Desc:     def.desc,
 		}
-		if def.special {
+		switch {
+		case def.special:
 			// 智能识别型：专用扫描（升级残留）
 			details := scanUpgradeResidue()
 			for _, d := range details {
@@ -159,17 +221,29 @@ func (c *CacheService) ScanCache() []models.CacheCategory {
 				cat.Paths = append(cat.Paths, d.Path)
 			}
 			cat.Exists = len(details) > 0
-			categories = append(categories, cat)
-			continue
-		}
-		paths := resolvePaths(def.paths)
-		cat.Paths = paths
-		for _, p := range paths {
-			res := scanPath(p)
-			cat.Size += res.Size
-			cat.FileCount += res.FileCount
-			if res.Exists {
-				cat.Exists = true
+		case len(def.filePatterns) > 0:
+			// 文件级模式：匹配指定文件（如 thumbcache_*.db）
+			files := resolveFilePatterns(def.filePatterns)
+			for _, f := range files {
+				info, err := os.Lstat(f)
+				if err != nil {
+					continue
+				}
+				cat.Size += info.Size()
+				cat.FileCount++
+				cat.Paths = append(cat.Paths, f)
+			}
+			cat.Exists = len(files) > 0
+		default:
+			paths := resolvePaths(def.paths)
+			cat.Paths = paths
+			for _, p := range paths {
+				res := scanPath(p)
+				cat.Size += res.Size
+				cat.FileCount += res.FileCount
+				if res.Exists {
+					cat.Exists = true
+				}
 			}
 		}
 		categories = append(categories, cat)
@@ -189,9 +263,25 @@ func (c *CacheService) CleanCache(names []string) []models.CleanResult {
 		if !want[def.name] {
 			continue
 		}
-		if def.special {
+		switch {
+		case def.special:
 			// 智能识别型：仅删除旧版本残留（保留最新），Package Cache 等需用户在详情中勾选
 			results = append(results, cleanUpgradeResidueOldVersions())
+			continue
+		case len(def.filePatterns) > 0:
+			// 文件级模式：仅删除匹配的缓存文件（如 thumbcache_*.db），不碰目录本身
+			files := resolveFilePatterns(def.filePatterns)
+			res := models.CleanResult{Category: def.name}
+			for _, f := range files {
+				freed, err := removePath(f)
+				if err != nil {
+					res.Errors = append(res.Errors, f+": "+err.Error())
+					continue
+				}
+				res.FreedBytes += freed
+				res.FileCount++
+			}
+			results = append(results, res)
 			continue
 		}
 		paths := resolvePaths(def.paths)
@@ -205,6 +295,31 @@ func (c *CacheService) CleanCache(names []string) []models.CleanResult {
 		results = append(results, res)
 	}
 	return results
+}
+
+// resolveFilePatterns 将文件级模式解析为实际存在的文件列表（展开环境变量 + 通配符）
+func resolveFilePatterns(patterns []string) []string {
+	var files []string
+	seen := make(map[string]bool)
+	for _, t := range patterns {
+		t = winutil.ExpandEnv(t)
+		if t == "" {
+			continue
+		}
+		matches, err := filepath.Glob(t)
+		if err != nil {
+			continue
+		}
+		for _, m := range matches {
+			if info, ierr := os.Lstat(m); ierr == nil && !info.IsDir() {
+				if !seen[m] {
+					seen[m] = true
+					files = append(files, m)
+				}
+			}
+		}
+	}
+	return files
 }
 
 // scanPath 计算单个路径的占用大小与文件数量

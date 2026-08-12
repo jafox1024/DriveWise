@@ -10,6 +10,25 @@
 // @ts-ignore: Unused imports
 import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wailsio/runtime";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as models$0 from "../models/models.js";
+
+/**
+ * CheckUpdate 检查 GitHub Releases 是否有新版本。
+ * 返回 UpdateInfo：包含当前/最新版本、是否有更新、发布页链接；失败时 Error 非空。
+ */
+export function CheckUpdate(): $CancellablePromise<models$0.UpdateInfo> {
+    return $Call.ByID(2227107819);
+}
+
+/**
+ * GetAppVersion 返回当前应用版本号
+ */
+export function GetAppVersion(): $CancellablePromise<string> {
+    return $Call.ByID(2079292231);
+}
+
 /**
  * IsAdmin 检测当前进程是否以管理员权限（elevated）运行
  */

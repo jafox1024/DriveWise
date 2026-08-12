@@ -116,6 +116,11 @@ export interface CacheCategory {
     "special": boolean;
 
     /**
+     * 是否需管理员权限（系统级目录）
+     */
+    "admin": boolean;
+
+    /**
      * 分类说明
      */
     "desc": string;
@@ -424,6 +429,41 @@ export interface ScanOptions {
      * 扫描引擎: auto | mft | walk
      */
     "engine": string;
+}
+
+/**
+ * UpdateInfo 版本检查结果
+ */
+export interface UpdateInfo {
+    /**
+     * 当前版本
+     */
+    "currentVersion": string;
+
+    /**
+     * 最新版本（空=未获取到）
+     */
+    "latestVersion": string;
+
+    /**
+     * 是否有新版本
+     */
+    "hasUpdate": boolean;
+
+    /**
+     * 更新页面链接
+     */
+    "releaseURL": string;
+
+    /**
+     * 检查时间
+     */
+    "checkedAt": string;
+
+    /**
+     * 检查失败原因（空=成功）
+     */
+    "error": string;
 }
 
 /**

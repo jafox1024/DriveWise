@@ -16,6 +16,7 @@ export type {
     RogueCleanResult,
     RogueItem,
     ScanOptions,
+    UpdateInfo,
     WinSxSAnalysis,
     WinSxSCleanStatus
 } from "./models.js";

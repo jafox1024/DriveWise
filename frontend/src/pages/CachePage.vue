@@ -483,6 +483,7 @@ onMounted(() => {
               <div class="flex items-center gap-2">
                 <span class="text-sm font-semibold text-slate-700">{{ cat.name }}</span>
                 <span v-if="cat.special" class="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-600">智能识别</span>
+                <span v-if="cat.admin" class="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-600" title="该系统级目录需要管理员权限，普通权限下可能清理失败">需管理员</span>
                 <span v-if="!cat.exists" class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-400">未检测到路径</span>
               </div>
               <!-- 小白解释 -->

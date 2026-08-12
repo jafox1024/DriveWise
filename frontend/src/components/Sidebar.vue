@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import { onMounted, ref } from "vue";
+import { Browser } from "@wailsio/runtime";
+import { SysService } from "../../bindings/drivewise/backend/sysinfo";
+import type { UpdateInfo } from "../../bindings/drivewise/backend/models";
+
 defineProps<{
   active: string;
 }>();
@@ -6,6 +11,46 @@ defineProps<{
 const emit = defineEmits<{
   select: [tab: string];
 }>();
+
+/* ========== 版本检查 ========== */
+const appVersion = ref("0.1.0");
+const checking = ref(false);
+const updateInfo = ref<UpdateInfo | null>(null);
+
+onMounted(async () => {
+  try {
+    const v = await SysService.GetAppVersion();
+    if (v) appVersion.value = v;
+  } catch {
+    /* 忽略，保留默认版本号 */
+  }
+});
+
+/** 检查更新：调用后端查询 GitHub Releases */
+async function checkUpdate() {
+  checking.value = true;
+  updateInfo.value = null;
+  try {
+    updateInfo.value = await SysService.CheckUpdate();
+  } catch (e) {
+    updateInfo.value = {
+      currentVersion: appVersion.value,
+      latestVersion: "",
+      hasUpdate: false,
+      releaseURL: "https://github.com/jafox1024/DriveWise/releases",
+      checkedAt: "",
+      error: `检查失败：${String(e)}`,
+    } as UpdateInfo;
+  } finally {
+    checking.value = false;
+  }
+}
+
+/** 打开更新页面（新版本或有错误提示时） */
+function openReleasePage() {
+  const url = updateInfo.value?.releaseURL || "https://github.com/jafox1024/DriveWise/releases";
+  void Browser.OpenURL(url);
+}
 
 interface NavItem {
   key: string;
@@ -122,7 +167,76 @@ const navItems: NavItem[] = [
     <div class="border-t border-slate-100 px-5 py-3">
       <div class="flex items-center gap-2 text-xs text-slate-400">
         <span class="inline-block h-2 w-2 rounded-full bg-emerald-400"></span>
-        服务运行中 · v0.1.0
+        服务运行中 · v{{ appVersion }}
+      </div>
+
+      <!-- 版本检查 -->
+      <div class="mt-2">
+        <button
+          class="flex w-full items-center justify-between rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-500 transition-colors hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="checking"
+          @click="checkUpdate"
+        >
+          <span class="flex items-center gap-1.5">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="h-3.5 w-3.5"
+            >
+              <path d="M21 12a9 9 0 1 1-9-9" />
+              <path d="M12 6v6l4 2" />
+            </svg>
+            <template v-if="checking">正在检查更新...</template>
+            <template v-else-if="updateInfo?.hasUpdate">发现新版本 v{{ updateInfo.latestVersion }}</template>
+            <template v-else-if="updateInfo && !updateInfo.error">已是最新版本</template>
+            <template v-else>检查更新</template>
+          </span>
+          <svg
+            v-if="updateInfo?.hasUpdate"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="h-3.5 w-3.5 text-amber-500"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 8v4l2 2" />
+          </svg>
+        </button>
+
+        <!-- 新版本提示 -->
+        <div
+          v-if="updateInfo?.hasUpdate"
+          class="mt-1.5 flex items-center justify-between gap-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-700"
+        >
+          <span>v{{ appVersion }} → v{{ updateInfo.latestVersion }}</span>
+          <button
+            class="rounded-md bg-amber-500 px-2 py-0.5 text-[10px] font-medium text-white transition-colors hover:bg-amber-600"
+            @click="openReleasePage"
+          >
+            去下载
+          </button>
+        </div>
+
+        <!-- 检查失败提示 -->
+        <div
+          v-else-if="updateInfo?.error"
+          class="mt-1.5 flex items-center justify-between gap-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600"
+        >
+          <span class="truncate">{{ updateInfo.error }}</span>
+          <button
+            class="shrink-0 rounded-md border border-red-200 px-2 py-0.5 text-[10px] text-red-500 transition-colors hover:bg-red-100"
+            @click="openReleasePage"
+          >
+            打开页面
+          </button>
+        </div>
       </div>
     </div>
   </aside>

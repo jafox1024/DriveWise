@@ -9,6 +9,7 @@ type CacheCategory struct {
 	Selected  bool     `json:"selected"`  // 默认是否选中
 	Exists    bool     `json:"exists"`    // 路径是否存在（存在才可扫描/清理）
 	Special   bool     `json:"special"`   // 是否智能识别型分类（升级残留等，需专用扫描）
+	Admin     bool     `json:"admin"`     // 是否需管理员权限（系统级目录）
 	Desc      string   `json:"desc"`      // 分类说明
 }
 
@@ -152,4 +153,14 @@ type BlacklistInfo struct {
 	White     int    `json:"white"`     // 白名单条数
 	LocalTime string `json:"localTime"` // 本地黑名单更新时间（空=使用内置）
 	LocalDir  string `json:"localDir"`  // 本地黑名单目录
+}
+
+// UpdateInfo 版本检查结果
+type UpdateInfo struct {
+	CurrentVersion string `json:"currentVersion"` // 当前版本
+	LatestVersion  string `json:"latestVersion"`  // 最新版本（空=未获取到）
+	HasUpdate      bool   `json:"hasUpdate"`      // 是否有新版本
+	ReleaseURL     string `json:"releaseURL"`     // 更新页面链接
+	CheckedAt      string `json:"checkedAt"`      // 检查时间
+	Error          string `json:"error"`          // 检查失败原因（空=成功）
 }
