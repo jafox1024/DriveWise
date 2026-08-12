@@ -16,7 +16,8 @@ import * as models$0 from "../models/models.js";
 
 /**
  * CheckUpdate 检查 GitHub Releases 是否有新版本。
- * 返回 UpdateInfo：包含当前/最新版本、是否有更新、发布页链接；失败时 Error 非空。
+ * 返回 UpdateInfo：包含当前/最新版本、状态（outdated/up-to-date/ahead/error）、发布页链接；
+ * 仅在网络或解析失败时 Error 非空；本地版本高于线上视为 ahead 状态，不提示异常。
  */
 export function CheckUpdate(): $CancellablePromise<models$0.UpdateInfo> {
     return $Call.ByID(2227107819);

@@ -451,6 +451,12 @@ export interface UpdateInfo {
     "hasUpdate": boolean;
 
     /**
+     * State 检查状态：outdated=有新版本 / up-to-date=已是最新 / ahead=本地版本领先（非异常） / error=检查失败
+     * 状态
+     */
+    "state": string;
+
+    /**
      * 更新页面链接
      */
     "releaseURL": string;

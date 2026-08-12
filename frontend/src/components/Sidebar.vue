@@ -13,7 +13,8 @@ const emit = defineEmits<{
 }>();
 
 /* ========== 版本检查 ========== */
-const appVersion = ref("0.1.0");
+// 版本号唯一来源为 build/config.yml，构建时注入后端，此处从后端获取，不再硬编码
+const appVersion = ref("…");
 const checking = ref(false);
 const updateInfo = ref<UpdateInfo | null>(null);
 
@@ -22,7 +23,7 @@ onMounted(async () => {
     const v = await SysService.GetAppVersion();
     if (v) appVersion.value = v;
   } catch {
-    /* 忽略，保留默认版本号 */
+    /* 忽略，保留占位 */
   }
 });
 
@@ -37,6 +38,7 @@ async function checkUpdate() {
       currentVersion: appVersion.value,
       latestVersion: "",
       hasUpdate: false,
+      state: "error",
       releaseURL: "https://github.com/jafox1024/DriveWise/releases",
       checkedAt: "",
       error: `检查失败：${String(e)}`,
@@ -191,8 +193,9 @@ const navItems: NavItem[] = [
               <path d="M12 6v6l4 2" />
             </svg>
             <template v-if="checking">正在检查更新...</template>
-            <template v-else-if="updateInfo?.hasUpdate">发现新版本 v{{ updateInfo.latestVersion }}</template>
-            <template v-else-if="updateInfo && !updateInfo.error">已是最新版本</template>
+            <template v-else-if="updateInfo?.state === 'outdated'">发现新版本 v{{ updateInfo.latestVersion }}</template>
+            <template v-else-if="updateInfo?.state === 'ahead'">已是最新版本</template>
+            <template v-else-if="updateInfo?.state === 'up-to-date'">已是最新版本</template>
             <template v-else>检查更新</template>
           </span>
           <svg
@@ -210,9 +213,9 @@ const navItems: NavItem[] = [
           </svg>
         </button>
 
-        <!-- 新版本提示 -->
+        <!-- 有新版本提示 -->
         <div
-          v-if="updateInfo?.hasUpdate"
+          v-if="updateInfo?.state === 'outdated'"
           class="mt-1.5 flex items-center justify-between gap-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-700"
         >
           <span>v{{ appVersion }} → v{{ updateInfo.latestVersion }}</span>
@@ -224,9 +227,17 @@ const navItems: NavItem[] = [
           </button>
         </div>
 
+        <!-- 本地版本领先提示（中性，非异常） -->
+        <div
+          v-else-if="updateInfo?.state === 'ahead'"
+          class="mt-1.5 rounded-lg bg-sky-50 px-2.5 py-1.5 text-[11px] text-sky-600"
+        >
+          已是最新版本 v{{ appVersion }} 是最新版本
+        </div>
+
         <!-- 检查失败提示 -->
         <div
-          v-else-if="updateInfo?.error"
+          v-else-if="updateInfo?.state === 'error'"
           class="mt-1.5 flex items-center justify-between gap-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600"
         >
           <span class="truncate">{{ updateInfo.error }}</span>

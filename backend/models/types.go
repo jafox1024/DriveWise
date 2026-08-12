@@ -160,7 +160,9 @@ type UpdateInfo struct {
 	CurrentVersion string `json:"currentVersion"` // 当前版本
 	LatestVersion  string `json:"latestVersion"`  // 最新版本（空=未获取到）
 	HasUpdate      bool   `json:"hasUpdate"`      // 是否有新版本
-	ReleaseURL     string `json:"releaseURL"`     // 更新页面链接
-	CheckedAt      string `json:"checkedAt"`      // 检查时间
-	Error          string `json:"error"`          // 检查失败原因（空=成功）
+	// State 检查状态：outdated=有新版本 / up-to-date=已是最新 / ahead=本地版本领先（非异常） / error=检查失败
+	State      string `json:"state"`      // 状态
+	ReleaseURL string `json:"releaseURL"` // 更新页面链接
+	CheckedAt  string `json:"checkedAt"`  // 检查时间
+	Error      string `json:"error"`      // 检查失败原因（空=成功）
 }
