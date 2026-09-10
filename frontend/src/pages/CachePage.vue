@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { CacheService } from "../../bindings/drivewise/backend/cleaner";
+import { SysService } from "../../bindings/drivewise/backend/sysinfo";
 import { useCacheStore } from "../stores/cache";
 import { useWinSxSStore } from "../stores/winsxs";
 import { formatBytes, formatCount } from "../utils/format";
@@ -9,8 +10,11 @@ import { explainPath } from "../utils/pathExplain";
 import AppModal from "../components/AppModal.vue";
 import type {
   CacheCategory,
+  CacheDetailItem,
   CacheDetailPath,
   CleanResult,
+  OSUpgradeRemnant,
+  OSCleanItemResult,
 } from "../../bindings/drivewise/backend/models";
 
 const store = useCacheStore();
@@ -41,10 +45,19 @@ const detailTotal = ref(0);
 /* WinSxS 确认弹窗（页面局部 UI 状态） */
 const showWinSxSConfirm = ref(false);
 
+/* 系统级高级功能区默认折叠，降低小白认知负担 */
+const showAdvanced = ref(false);
+
 const allSelected = computed(() => {
-  const list = categories.value;
+  // 数据保护分类（聊天/办公数据）不可勾选，不计入全选
+  const list = categories.value.filter((c) => !c.dataOnly);
   return list.length > 0 && list.every((c) => c.selected);
 });
+
+/** 当前详情视图对应的分类对象（用于识别数据保护分类） */
+const detailCat = computed(() =>
+  categories.value.find((c) => c.name === detailCategory.value),
+);
 
 const totalFreed = computed(() =>
   lastResults.value.reduce((s, r) => s + (r.freedBytes || 0), 0),
@@ -121,7 +134,33 @@ function closeDetail() {
   store.scan();
 }
 
+/** 按路径查找详情条目（用于判断是否为空目录） */
+function findDetailItem(path: string): CacheDetailItem | undefined {
+  for (const d of details.value) {
+    for (const it of d.items ?? []) {
+      if (it.path === path) return it;
+    }
+  }
+  return undefined;
+}
+
+/** 可勾选清理的条目：普通分类全部；数据保护分类仅空目录（无文件残留） */
+function selectableItems(d: CacheDetailPath): CacheDetailItem[] {
+  if (detailCat.value?.dataOnly) {
+    return (d.items ?? []).filter((it) => it.isDir && it.empty);
+  }
+  return d.items ?? [];
+}
+
+/** 数据保护分类下可清理（空目录）数量 */
+function selectableCount(d: CacheDetailPath): number {
+  return selectableItems(d).length;
+}
+
 function toggleDetailItem(path: string) {
+  const it = findDetailItem(path);
+  // 数据保护分类：仅空目录（整棵子树无文件）可勾选删除，其余禁止
+  if (detailCat.value?.dataOnly && !(it?.isDir && it.empty)) return;
   const next = new Set(detailCleanIds.value);
   if (next.has(path)) next.delete(path);
   else next.add(path);
@@ -130,7 +169,7 @@ function toggleDetailItem(path: string) {
 
 function selectAllInPath(d: CacheDetailPath, checked: boolean) {
   const next = new Set(detailCleanIds.value);
-  for (const it of d.items ?? []) {
+  for (const it of selectableItems(d)) {
     if (checked) next.add(it.path);
     else next.delete(it.path);
   }
@@ -165,9 +204,122 @@ function confirmWinSxSClean() {
   void winsxsStore.startClean();
 }
 
+/** 需要管理员权限时：以管理员身份重启本程序（UAC 提权），重启后由用户重新触发清理 */
+async function relaunchAsAdmin() {
+  try {
+    await SysService.RestartAsAdmin();
+  } catch (e) {
+    winsxsError.value = "提权失败：" + ((e as Error)?.message ?? String(e));
+  }
+}
+
+/* ========== WinSxS 激进清理（/ResetBase，不可逆） ========== */
+const showWinSxSResetConfirm = ref(false);
+
+function requestWinSxSReset() {
+  winsxsError.value = "";
+  showWinSxSResetConfirm.value = true;
+}
+
+function confirmWinSxSReset() {
+  showWinSxSResetConfirm.value = false;
+  void winsxsStore.startClean(true);
+}
+
+/* ========== 系统升级残留（$WINDOWS.~BT / Windows.old 等） ========== */
+const osRemnants = ref<OSUpgradeRemnant[]>([]);
+const osScanLoading = ref(false);
+const osSelected = ref<Set<string>>(new Set());
+const osCleaning = ref(false);
+const osResults = ref<OSCleanItemResult[]>([]);
+const showOSCleanConfirm = ref(false);
+const osScanError = ref("");
+
+const osTotalSize = computed(() =>
+  osRemnants.value
+    .filter((r) => osSelected.value.has(r.path))
+    .reduce((s, r) => s + (r.size || 0), 0),
+);
+
+function osAllSelected(): boolean {
+  return osRemnants.value.length > 0 && osRemnants.value.every((r) => osSelected.value.has(r.path));
+}
+
+function toggleOS(path: string, v: boolean) {
+  if (v) osSelected.value.add(path);
+  else osSelected.value.delete(path);
+  osSelected.value = new Set(osSelected.value);
+}
+
+function toggleOSAll(v: boolean) {
+  const set = new Set<string>();
+  if (v) for (const r of osRemnants.value) set.add(r.path);
+  osSelected.value = set;
+}
+
+async function scanOSRemnants() {
+  osScanLoading.value = true;
+  osScanError.value = "";
+  try {
+    osRemnants.value = (await CacheService.ScanOSUpgradeRemnants()) ?? [];
+    // 默认全部选中
+    osSelected.value = new Set(osRemnants.value.map((r) => r.path));
+    osResults.value = [];
+  } catch (e) {
+    osScanError.value = (e as Error)?.message ?? String(e);
+  } finally {
+    osScanLoading.value = false;
+  }
+}
+
+function requestCleanOS() {
+  showOSCleanConfirm.value = true;
+}
+
+async function confirmCleanOS() {
+  showOSCleanConfirm.value = false;
+  if (osSelected.value.size === 0) return;
+  osCleaning.value = true;
+  osResults.value = [];
+  const paths = Array.from(osSelected.value);
+  try {
+    const results = (await CacheService.CleanOSUpgradeRemnants(paths)) ?? [];
+    osResults.value = results;
+    // 清理后清除成功项的选中，重新扫描刷新占用
+    for (const r of results) {
+      if (r.success) osSelected.value.delete(r.path);
+      osSelected.value = new Set(osSelected.value);
+    }
+    // 重新扫描看还有哪些残留
+    await scanOSRemnantsPreserve();
+  } catch (e) {
+    osScanError.value = (e as Error)?.message ?? String(e);
+  } finally {
+    osCleaning.value = false;
+  }
+}
+
+/** 清理后刷新：只保留仍存在的目录，选中项按最新结果重新标记 */
+async function scanOSRemnantsPreserve() {
+  const keep = new Set(Array.from(osSelected.value));
+  osScanLoading.value = true;
+  try {
+    const list = (await CacheService.ScanOSUpgradeRemnants()) ?? [];
+    osRemnants.value = list;
+    const set = new Set<string>();
+    for (const r of list) {
+      if (keep.has(r.path)) set.add(r.path);
+    }
+    osSelected.value = set;
+  } finally {
+    osScanLoading.value = false;
+  }
+}
+
 /* 页面挂载时恢复 WinSxS 进度：清理若仍在后台运行则续上轮询，避免切换页面后进度丢失 */
 onMounted(() => {
   void winsxsStore.ensurePolling();
+  void scanOSRemnants();
 });
 </script>
 
@@ -189,24 +341,44 @@ onMounted(() => {
         </div>
         <div>
           <h1 class="text-2xl font-bold text-slate-800">{{ detailCategory }} · 详情</h1>
-          <p class="mt-1 text-sm text-slate-500">
+          <p v-if="detailCat?.dataOnly" class="mt-1 text-sm text-rose-600">
+            该分类为聊天记录/办公文档等个人数据。<b>仅可删除空目录</b>（无任何文件的残留目录结构），有内容的条目一律禁止清理
+          </p>
+          <p v-else class="mt-1 text-sm text-slate-500">
             勾选需要删除的具体条目，总占用 {{ formatBytes(detailTotal) }}；删除后可在回收站找回
           </p>
         </div>
       </header>
 
+      <!-- 数据保护分类：迁移提示条 -->
+      <div
+        v-if="detailCat?.dataOnly"
+        class="mb-5 flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700"
+      >
+        <span class="mt-0.5 shrink-0 text-lg leading-none">🛡️</span>
+        <div class="min-w-0">
+          <div class="font-medium">非空内容不可清理</div>
+          <p class="mt-1 text-xs leading-relaxed text-rose-600">
+            {{ detailCat?.migrateHint || "删除这些数据将导致聊天记录/文档永久丢失。" }}
+          </p>
+        </div>
+      </div>
+
       <!-- 清理操作条 -->
       <div class="sticky top-0 z-10 mb-5 flex items-center justify-between rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur">
         <span class="text-sm text-slate-600">
           已选 <span class="font-bold text-blue-600">{{ detailCleanIds.size }}</span> 项
-          （{{ formatBytes(detailSelectedSize) }}）
+          <template v-if="!detailCat?.dataOnly">（{{ formatBytes(detailSelectedSize) }}）</template>
+          <template v-else>（空目录）</template>
         </span>
         <button
           class="rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white shadow-md shadow-red-200 transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
           :disabled="detailCleaning || detailCleanIds.size === 0"
           @click="cleanDetailItems"
         >
-          {{ detailCleaning ? "清理中..." : "清理选中条目" }}
+          {{ detailCleaning
+            ? "清理中..."
+            : detailCat?.dataOnly ? "删除选中空目录" : "清理选中条目" }}
         </button>
       </div>
 
@@ -232,14 +404,14 @@ onMounted(() => {
                 >{{ explainPath(d.path) }}</span>
               </div>
             </div>
-            <label v-if="(d.items ?? []).length" class="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs text-slate-500">
+            <label v-if="selectableCount(d) > 0" class="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs text-slate-500">
               <input
                 type="checkbox"
                 class="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
-                :checked="(d.items ?? []).every((it) => detailCleanIds.has(it.path))"
+                :checked="selectableItems(d).every((it) => detailCleanIds.has(it.path))"
                 @change="(e) => selectAllInPath(d, (e.target as HTMLInputElement).checked)"
               />
-              全选
+              {{ detailCat?.dataOnly ? "全选空目录" : "全选" }}
             </label>
           </div>
 
@@ -255,6 +427,7 @@ onMounted(() => {
               <input
                 type="checkbox"
                 class="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                :disabled="detailCat?.dataOnly ? !(it.isDir && it.empty) : false"
                 :checked="detailCleanIds.has(it.path)"
                 @change="toggleDetailItem(it.path)"
               />
@@ -262,6 +435,15 @@ onMounted(() => {
               <span class="min-w-0 flex-1 truncate text-sm text-slate-700" :title="it.path">
                 {{ it.name }}
               </span>
+              <!-- 数据保护分类：标注可删空目录 / 禁删数据 -->
+              <span
+                v-if="detailCat?.dataOnly && it.isDir && it.empty"
+                class="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600"
+              >空目录·可删</span>
+              <span
+                v-else-if="detailCat?.dataOnly"
+                class="shrink-0 rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-500"
+              >数据·禁删</span>
               <span
                 v-if="explainPath(it.name)"
                 class="shrink-0 cursor-help text-slate-300 hover:text-blue-500"
@@ -292,57 +474,59 @@ onMounted(() => {
         <div>
           <h1 class="text-2xl font-bold text-slate-800">缓存清理</h1>
           <p class="mt-0.5 text-sm text-slate-500">
-            扫描并清理系统与应用产生的临时文件、缓存。点击分类「详情」可查看具体内容并针对性勾选清理，悬停 ⓘ 了解用途。
+            帮你清掉电脑里没用的临时文件和缓存，释放 C 盘空间。安全项已默认勾选，直接点「清理选中」即可。
           </p>
         </div>
       </header>
 
-      <!-- 统计卡片 -->
-      <div class="mb-6 grid grid-cols-4 gap-4">
+      <!-- 关键数字（只留两个最关键，降低密度） -->
+      <div class="mb-5 grid grid-cols-2 gap-4">
         <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div class="flex items-center gap-2 text-xs text-slate-400">
-            <span class="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-50 text-blue-500">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5"><path d="M21 12a9 9 0 1 1-9-9" stroke-linecap="round" /><path d="M12 6v6l4 2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </span>
-            可清理空间
-          </div>
-          <div class="mt-1 text-xl font-bold text-slate-800">{{ formatBytes(store.totalSize) }}</div>
+          <div class="text-xs text-slate-400">可释放空间</div>
+          <div class="mt-1 text-2xl font-bold text-slate-800">{{ formatBytes(store.cleanableSize) }}</div>
         </div>
         <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div class="flex items-center gap-2 text-xs text-slate-400">
-            <span class="flex h-6 w-6 items-center justify-center rounded-lg bg-cyan-50 text-cyan-500">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5"><path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round" /><circle cx="12" cy="12" r="9" /></svg>
-            </span>
-            选中空间
+          <div class="text-xs text-slate-400">
+            已选 {{ categories.filter((c) => c.selected && !c.dataOnly).length }} 项
           </div>
-          <div class="mt-1 text-xl font-bold" :class="store.selectedSize > 0 ? 'text-blue-600' : 'text-slate-800'">
+          <div
+            class="mt-1 text-2xl font-bold"
+            :class="store.selectedSize > 0 ? 'text-blue-600' : 'text-slate-800'"
+          >
             {{ formatBytes(store.selectedSize) }}
           </div>
         </div>
-        <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div class="flex items-center gap-2 text-xs text-slate-400">
-            <span class="flex h-6 w-6 items-center justify-center rounded-lg bg-violet-50 text-violet-500">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5"><path d="M4 7h16M4 12h16M4 17h10" stroke-linecap="round" /></svg>
-            </span>
-            文件总数
-          </div>
-          <div class="mt-1 text-xl font-bold text-slate-800">
-            {{ formatCount(categories.reduce((s, c) => s + (c.fileCount || 0), 0)) }}
-          </div>
-        </div>
-        <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div class="flex items-center gap-2 text-xs text-slate-400">
-            <span class="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-50 text-amber-500">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </span>
-            上次扫描
-          </div>
-          <div class="mt-1.5 text-sm font-semibold text-slate-600">{{ lastScanTime || "尚未扫描" }}</div>
-        </div>
       </div>
 
-      <!-- WinSxS 组件存储 -->
-      <div class="mb-5 overflow-hidden rounded-2xl border border-violet-200 bg-gradient-to-br from-violet-50 via-white to-white p-5 shadow-sm">
+      <!-- 高级功能：系统级深度清理（默认折叠，减少信息量） -->
+      <div class="mb-5 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <button
+          class="flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition-colors hover:bg-slate-50"
+          @click="showAdvanced = !showAdvanced"
+        >
+          <div class="min-w-0">
+            <div class="text-sm font-semibold text-slate-700">高级功能：系统级深度清理</div>
+            <div class="mt-0.5 text-xs text-slate-400">
+              清理 Windows 更新组件、系统升级残留等，需要管理员权限。日常使用无需理会。
+            </div>
+          </div>
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="h-4 w-4 shrink-0 text-slate-400 transition-transform"
+            :class="{ 'rotate-90': showAdvanced }"
+          >
+            <path d="m9 18 6-6-6-6" />
+          </svg>
+        </button>
+
+        <div v-if="showAdvanced" class="space-y-4 border-t border-slate-100 bg-slate-50/40 p-4">
+          <!-- WinSxS 组件存储 -->
+          <div class="overflow-hidden rounded-2xl border border-violet-200 bg-gradient-to-br from-violet-50 via-white to-white p-5 shadow-sm">
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0 flex-1">
             <div class="flex flex-wrap items-center gap-2">
@@ -380,6 +564,15 @@ onMounted(() => {
               >
                 {{ winsxsStatus.success ? "✅" : "⚠️" }} {{ winsxsStatus.message }}
               </div>
+
+              <!-- 权限不足时提供一键提权入口 -->
+              <button
+                v-if="!winsxsStatus.success && String(winsxsStatus.message).includes('管理员')"
+                class="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-amber-600"
+                @click="relaunchAsAdmin"
+              >
+                以管理员身份重启 DriveWise 后立即重试
+              </button>
             </div>
 
             <div v-if="winsxsError" class="mt-2 text-xs text-red-500">{{ winsxsError }}</div>
@@ -398,22 +591,134 @@ onMounted(() => {
               <template v-else-if="winsxsDone">{{ winsxsStatus?.success ? "再次清理" : "重试清理" }}</template>
               <template v-else>开始清理</template>
             </button>
+            <button
+              class="rounded-lg border border-amber-300 bg-amber-50 px-5 py-2 text-sm font-medium text-amber-800 shadow-sm transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="winsxsRunning || winsxsApiBusy"
+              @click="requestWinSxSReset"
+            >
+              激进清理（不可逆）
+            </button>
           </div>
+        </div>
+      </div>
+
+      <!-- 系统升级残留 -->
+      <div
+        class="overflow-hidden rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-white p-5 shadow-sm"
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0 flex-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <h2 class="text-sm font-semibold text-sky-800">Windows 系统升级残留</h2>
+              <span class="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-600"
+                >系统级 · 需管理员</span
+              >
+              <span
+                v-if="osScanLoading"
+                class="flex items-center gap-1 rounded-full bg-sky-600 px-2 py-0.5 text-[10px] font-medium text-white"
+              >
+                <span class="h-1.5 w-1.5 animate-ping rounded-full bg-white"></span> 扫描中
+              </span>
+            </div>
+            <p class="mt-1 text-xs leading-relaxed text-slate-500">
+              大版本升级后 Windows 会保留旧系统目录（<code>$WINDOWS.~BT</code>、
+              <code>Windows.old</code> 等），常见占用 2–15 GB，由系统高权限持有，清理前会自动夺回所有权。
+            </p>
+
+            <!-- 未发现 -->
+            <div v-if="!osScanLoading && osRemnants.length === 0" class="mt-2 text-xs text-slate-500">
+              ✅ 未发现系统升级残留（近期未做大版本升级，或已清理）。
+            </div>
+
+            <!-- 列表 -->
+            <div v-if="osRemnants.length > 0" class="mt-3 space-y-2">
+              <label
+                class="flex cursor-pointer items-center justify-between gap-2 rounded-lg bg-white/70 px-3 py-2 text-xs text-slate-600"
+              >
+                <span>全选（当前可回收 <b>{{ formatBytes(osTotalSize) }}</b>）</span>
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                  :checked="osAllSelected()"
+                  @change="(e) => toggleOSAll((e.target as HTMLInputElement).checked)"
+                />
+              </label>
+              <div
+                v-for="r in osRemnants"
+                :key="r.path"
+                class="flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-white/60 px-3 py-2"
+              >
+                <label class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 shrink-0 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                    :checked="osSelected.has(r.path)"
+                    @change="(e) => toggleOS(r.path, (e.target as HTMLInputElement).checked)"
+                  />
+                  <span class="shrink-0 text-slate-700">{{ r.name }}</span>
+                  <span class="truncate font-mono text-[10px] text-slate-400">{{ r.path }}</span>
+                </label>
+                <span class="shrink-0 text-xs font-medium text-sky-700">{{ formatBytes(r.size) }}</span>
+              </div>
+            </div>
+
+            <!-- 清理结果 -->
+            <div v-if="osResults.length > 0" class="mt-3 space-y-1.5 text-xs">
+              <div
+                v-for="res in osResults"
+                :key="res.path"
+                class="flex items-center gap-2 rounded-lg px-2.5 py-1.5"
+                :class="res.success ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'"
+              >
+                {{ res.success ? "✅" : "⚠️" }}
+                {{
+                  res.success
+                    ? `${res.name}：已清理，释放 ${formatBytes(res.freedBytes)}`
+                    : `${res.name}：${res.error}`
+                }}
+              </div>
+            </div>
+
+            <div v-if="osScanError" class="mt-2 text-xs text-red-500">{{ osScanError }}</div>
+          </div>
+
+          <div class="flex shrink-0 flex-col items-stretch gap-2">
+            <button
+              class="rounded-lg bg-sky-600 px-5 py-2 text-sm font-medium text-white shadow-md shadow-sky-200 transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="osScanLoading || osCleaning || osSelected.size === 0"
+              @click="requestCleanOS"
+            >
+              <template v-if="osCleaning">清理中...</template>
+              <template v-else>清理所选（{{ osSelected.size }}）</template>
+            </button>
+            <button
+              class="rounded-lg border border-slate-200 bg-white px-5 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50 disabled:opacity-50"
+              :disabled="osScanLoading || osCleaning"
+              @click="scanOSRemnants"
+            >
+              重新扫描
+            </button>
+          </div>
+        </div>
+      </div>
         </div>
       </div>
 
       <!-- 操作栏 -->
       <div class="mb-5 flex items-center justify-between rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <label class="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
-          <input
-            type="checkbox"
-            class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            :checked="allSelected"
-            :indeterminate="!allSelected && categories.some((c) => c.selected)"
-            @change="(e) => store.toggleAll((e.target as HTMLInputElement).checked)"
-          />
-          全选
-        </label>
+        <div class="flex flex-col gap-1">
+          <label class="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+            <input
+              type="checkbox"
+              class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+              :checked="allSelected"
+              :indeterminate="!allSelected && categories.some((c) => c.selected)"
+              @change="(e) => store.toggleAll((e.target as HTMLInputElement).checked)"
+            />
+            全选可清理项
+          </label>
+          <span class="pl-6 text-[11px] text-slate-400">上次扫描：{{ lastScanTime || "尚未扫描" }}</span>
+        </div>
         <div class="flex items-center gap-3">
           <button
             class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
@@ -476,23 +781,27 @@ onMounted(() => {
             <input
               type="checkbox"
               v-model="cat.selected"
-              :disabled="!cat.exists"
+              :disabled="!cat.exists || cat.dataOnly"
               class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
             />
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
                 <span class="text-sm font-semibold text-slate-700">{{ cat.name }}</span>
-                <span v-if="cat.special" class="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-600">智能识别</span>
+                <span v-if="cat.dataOnly" class="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-600" title="聊天记录/办公文档等个人数据，禁止清理，仅提示迁移">数据保护·不可清理</span>
                 <span v-if="cat.admin" class="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-600" title="该系统级目录需要管理员权限，普通权限下可能清理失败">需管理员</span>
                 <span v-if="!cat.exists" class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-400">未检测到路径</span>
               </div>
-              <!-- 小白解释 -->
+              <!-- 白话说明 -->
               <div v-if="catDesc(cat)" class="mt-0.5 truncate text-xs text-slate-400">
-                <span class="mr-1 cursor-help text-slate-300" :title="catDesc(cat)">ⓘ</span>{{ catDesc(cat) }}
+                {{ catDesc(cat) }}
               </div>
-              <div class="mt-0.5 truncate font-mono text-[10px] text-slate-300">
-                {{ (cat.paths ?? []).slice(0, 2).join("；") }}
-                <template v-if="(cat.paths?.length ?? 0) > 2"> 等 {{ (cat.paths ?? []).length }} 个路径</template>
+              <!-- 数据保护分类：迁移建议（不截断，完整展示） -->
+              <div
+                v-if="cat.dataOnly && cat.migrateHint"
+                class="mt-1 flex items-start gap-1.5 rounded-lg bg-rose-50 px-2 py-1.5 text-[11px] leading-relaxed text-rose-600"
+              >
+                <span class="shrink-0">🛡️</span>
+                <span>{{ cat.migrateHint }}</span>
               </div>
             </div>
             <div class="flex items-center gap-4 text-sm">
@@ -558,6 +867,42 @@ onMounted(() => {
         <li class="flex gap-2"><span>🧹</span> 通过系统 DISM 工具安全回收组件存储中不再使用的旧版本</li>
         <li class="flex gap-2"><span>⏱️</span> 后台执行，不会卡住界面，可随时切到其他页面</li>
         <li class="flex gap-2"><span>⚠️</span> 清理期间请勿强制关闭本程序，以免中断</li>
+      </ul>
+    </AppModal>
+
+    <!-- WinSxS 激进清理确认弹窗 -->
+    <AppModal
+      :open="showWinSxSResetConfirm"
+      title="开始激进清理 WinSxS？（不可逆）"
+      subtitle="在标准清理基础上额外删除所有历史版本组件，通常可多释放 1–20 GB"
+      confirm-text="我了解，开始激进清理"
+      tone="danger"
+      @confirm="confirmWinSxSReset"
+      @cancel="showWinSxSResetConfirm = false"
+    >
+      <ul class="space-y-2 text-xs text-slate-600">
+        <li class="flex gap-2"><span>🔒</span> <b>不可逆</b>：Windows 组件回滚 / 还原此安装将失效</li>
+        <li class="flex gap-2"><span>🔐</span> 需要以管理员身份运行，否则失败并提示提权</li>
+        <li class="flex gap-2"><span>🧹</span> 命令：DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase</li>
+        <li class="flex gap-2"><span>⏱️</span> 后台执行，耗时可能 15–50 分钟，勿强制关闭</li>
+      </ul>
+    </AppModal>
+
+    <!-- 系统升级残留清理确认弹窗 -->
+    <AppModal
+      :open="showOSCleanConfirm"
+      title="清理系统升级残留？"
+      :subtitle="`将删除 ${osSelected.size} 个目录，预计释放 ${formatBytes(osTotalSize)}`"
+      confirm-text="确认清理"
+      tone="danger"
+      @confirm="confirmCleanOS"
+      @cancel="showOSCleanConfirm = false"
+    >
+      <ul class="space-y-2 text-xs text-slate-600">
+        <li class="flex gap-2"><span>🗑️</span> 目标：<code>$WINDOWS.~BT</code>、<code>$WINDOWS.~WS</code>、<code>Windows.old</code> 等</li>
+        <li class="flex gap-2"><span>🔐</span> 属系统高权限持有，需以管理员身份运行</li>
+        <li class="flex gap-2"><span>🔁</span> 会自动执行 takeown / icacls 夺回所有权后删除</li>
+        <li class="flex gap-2"><span>🚫</span> 删除前请确认未安装到一半的升级流程，否则可能影响升级回滚</li>
       </ul>
     </AppModal>
   </div>

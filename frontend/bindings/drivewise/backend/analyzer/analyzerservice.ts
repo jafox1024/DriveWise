@@ -37,9 +37,7 @@ export function GetDrives(): $CancellablePromise<models$0.DriveInfo[] | null> {
 }
 
 /**
- * OpenInExplorer 在资源管理器中打开目录（或定位选中文件）
- * 目录使用 rundll32 url.dll 协议处理器：提权进程也能以普通用户会话打开资源管理器
- * （直接 spawn explorer.exe 在提权环境下常出现窗口不显示的问题）
+ * OpenInExplorer 在资源管理器中打开目录（或定位选中文件）。
  */
 export function OpenInExplorer(path: string): $CancellablePromise<void> {
     return $Call.ByID(2023167314, path);

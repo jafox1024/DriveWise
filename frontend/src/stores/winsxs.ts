@@ -53,12 +53,17 @@ export const useWinSxSStore = defineStore("winsxs", () => {
     }
   }
 
-  /** 启动后台清理并开始轮询 */
-  async function startClean() {
+  /**
+   * 启动后台清理并开始轮询
+   * @param useResetBase 是否使用激进清理（/ResetBase，不可逆），默认走标准清理
+   */
+  async function startClean(useResetBase = false) {
     apiBusy.value = true;
     error.value = "";
     try {
-      status.value = await CacheService.StartWinSxSClean();
+      status.value = useResetBase
+        ? await CacheService.StartWinSxSCleanResetBase()
+        : await CacheService.StartWinSxSClean();
       startPolling();
     } catch (e) {
       error.value = `启动失败：${String(e)}`;

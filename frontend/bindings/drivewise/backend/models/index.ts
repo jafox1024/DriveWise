@@ -13,6 +13,8 @@ export type {
     DriveInfo,
     FileNode,
     MigratableApp,
+    OSCleanItemResult,
+    OSUpgradeRemnant,
     RogueCleanResult,
     RogueItem,
     ScanOptions,

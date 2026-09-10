@@ -57,7 +57,7 @@ async function restartAsAdmin() {
         <Transition name="fade" mode="out-in">
           <CachePage v-if="activeTab === 'cache'" key="cache" />
           <AnalyzerPage v-else-if="activeTab === 'analyzer'" key="analyzer" />
-          <RoguePage v-else-if="activeTab === 'rogue'" key="rogue" />
+          <RoguePage v-else-if="activeTab === 'rogue'" key="rogue" :is-admin="adminChecked && isAdmin" />
           <MigratorPage v-else-if="activeTab === 'migrator'" key="migrator" />
         </Transition>
       </main>

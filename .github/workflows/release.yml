@@ -1,0 +1,137 @@
+# DriveWise 自动打包发布工作流
+#
+# 触发方式
+#   - 推送到主分支（main / master）后自动打包并创建 GitHub Release
+#   - 也可在仓库 Actions 页面手动触发（workflow_dispatch）
+#
+# 版本号唯一来源
+#   build/config.yml 的 info.version，由 tools/readver 读取。
+#   该值同时通过 -ldflags 注入二进制（backend/sysinfo.AppVersion），
+#   因此 Release 标签与程序「关于」里显示的版本始终一致。
+#
+# 标签规则（保证每次提交都能发布出独立的新版本，不会因标签冲突失败）
+#   1) v{version} 不存在        → 用 v{version}，例如 v0.2.0
+#   2) v{version} 已被占用      → 追加构建号，例如 v0.2.0-build.57
+#
+# 发布产物
+#   - DriveWise-{tag}.exe                    裸可执行文件
+#   - DriveWise-{tag}-windows-amd64.zip      含 exe 与 README 的压缩包
+
+name: Release
+
+env:
+  # wails3 CLI 版本：与 go.mod 中 github.com/wailsapp/wails/v3 保持一致
+  # （用 `wails3 version` 查看本地版本）。升级前先执行：
+  #   go get github.com/wailsapp/wails/v3@<version>
+  #   go install github.com/wailsapp/wails/v3/cmd/wails3@<version>
+  #   wails3 generate bindings -ts      # 确认绑定无变化或已同步
+  # 若版本不同步，CI 重新生成的 TS 绑定可能与本仓库提交的绑定不一致，
+  # 导致前端 vue-tsc 报错。
+  WAILS_CLI_VERSION: v3.0.0-beta.19
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+# 创建 Release / 打标签需要内容写权限
+permissions:
+  contents: write
+
+# 同一分支串行发布，避免并发运行互相抢占标签
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: 打包并发布 (Windows amd64)
+    runs-on: windows-latest
+
+    steps:
+      - name: 拉取代码（含全部标签，用于判断版本标签是否已存在）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: 安装 Go（版本跟随 go.mod）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装 wails3 CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@${WAILS_CLI_VERSION}"
+
+      - name: 将 Go bin 目录加入 PATH
+        shell: bash
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: 解析版本号与发布标签
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(go run ./tools/readver)"
+          TAG="v${VERSION}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            TAG="v${VERSION}-build.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "解析结果：version=${VERSION}  tag=${TAG}"
+
+      - name: 构建（生成绑定 → 构建前端 → 编译 exe）
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          # 走项目自带 Taskfile（wails3 内置任务运行器，与本地构建一致）：
+          # go mod tidy → npm install --legacy-peer-deps → wails3 generate bindings
+          # → npm run build → wails3 generate syso → go build（生产参数）
+          wails3 task build ARCH=amd64
+
+      - name: 校验构建产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la bin/
+          test -f bin/drivewise.exe
+          echo "构建产物就绪：bin/drivewise.exe"
+
+      - name: 打包发布文件（zip + 裸 exe）
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $dir = "release/DriveWise-$tag-windows-amd64"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "bin/drivewise.exe" "$dir/DriveWise.exe"
+          Copy-Item "README.md" "$dir/README.md"
+          Compress-Archive -Path "$dir/*" -DestinationPath "release/DriveWise-$tag-windows-amd64.zip" -Force
+          Copy-Item "bin/drivewise.exe" "release/DriveWise-$tag.exe"
+          Get-ChildItem release -Recurse | Select-Object FullName, Length
+
+      - name: 创建 / 更新 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: DriveWise ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            release/DriveWise-${{ steps.ver.outputs.tag }}.exe
+            release/DriveWise-${{ steps.ver.outputs.tag }}-windows-amd64.zip

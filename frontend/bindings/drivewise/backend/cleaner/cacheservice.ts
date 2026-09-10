@@ -37,6 +37,15 @@ export function CleanCacheItems(categoryName: string, itemPaths: string[] | null
 }
 
 /**
+ * CleanOSUpgradeRemnants 清理给定的升级残留路径（白名单校验后夺所有权并删除）。
+ * 逐目录：先 takeown 夺所有权 → icacls 授权 Administrators 完全控制 → os.RemoveAll。
+ * 删除失败（文件被占用等）不影响其它目录。
+ */
+export function CleanOSUpgradeRemnants(paths: string[] | null): $CancellablePromise<models$0.OSCleanItemResult[] | null> {
+    return $Call.ByID(1989185503, paths);
+}
+
+/**
  * GetWinSxSStatus 查询 WinSxS 后台清理状态（未启动时返回零值状态）
  */
 export function GetWinSxSStatus(): $CancellablePromise<models$0.WinSxSCleanStatus> {
@@ -58,10 +67,27 @@ export function ScanCacheDetails(categoryName: string): $CancellablePromise<mode
 }
 
 /**
+ * ScanOSUpgradeRemnants 扫描系统盘下的升级残留并统计占用。
+ * 仅返回真实存在的目录；大小用并发 DirSize 计算，Windows.old 较大时耗时若干秒。
+ */
+export function ScanOSUpgradeRemnants(): $CancellablePromise<models$0.OSUpgradeRemnant[] | null> {
+    return $Call.ByID(1381021599);
+}
+
+/**
  * StartWinSxSClean 后台启动 WinSxS 组件存储清理（dism /StartComponentCleanup）。
  * 立即返回，实际清理在后台 goroutine 中执行，前端可通过 GetWinSxSStatus 查询进度。
  * 需要管理员权限；耗时可能达数十分钟，期间不阻塞界面。
  */
 export function StartWinSxSClean(): $CancellablePromise<models$0.WinSxSCleanStatus> {
     return $Call.ByID(500525369);
+}
+
+/**
+ * StartWinSxSCleanResetBase 后台启动 WinSxS 激进清理（dism /StartComponentCleanup /ResetBase）。
+ * 相比标准清理额外删除所有历史版本组件，释放更多空间，但「还原此 Windows 安装 / 组件回滚」将不可用，
+ * 属破坏性操作——前端须二次确认后调用。状态/轮询/接口与标准清理完全共用。
+ */
+export function StartWinSxSCleanResetBase(): $CancellablePromise<models$0.WinSxSCleanStatus> {
+    return $Call.ByID(3437117697);
 }

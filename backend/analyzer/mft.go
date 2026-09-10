@@ -15,9 +15,10 @@ type mftRecord struct {
 	isDir     bool
 	parent    uint32   // 父目录记录号（FILE_NAME 属性）
 	name      string   // 文件名（优先非 DOS 命名空间）
-	size      int64    // $DATA 大小（文件）
+	size      int64    // $DATA 未命名流逻辑大小（文件）
 	isReparse bool     // 重解析点（联接/符号链接）
-	dataExt   []uint32 // $DATA 属性所在的扩展记录号（$ATTRIBUTE_LIST）
+	dataExt   []uint32 // 未命名 $DATA 属性所在的扩展记录号（$ATTRIBUTE_LIST）
+	nameExt   []uint32 // FILE_NAME 属性所在的扩展记录号（$ATTRIBUTE_LIST，用于补名/补父引用）
 }
 
 // mftParser NTFS MFT 解析器
@@ -193,7 +194,11 @@ func parseMFTRecord(rec []byte) *mftRecord {
 				}
 			}
 		case attrTypeData:
-			// 仅取首个未命名数据流大小（命名流/扩展属性不重复计）
+			// 仅统计未命名数据流：命名流（如 Zone.Identifier 等 ADS）不参与大小统计，
+			// 否则可能把真实文件大小算成小流大小或漏掉真实流
+			if off+9 >= len(rec) || rec[off+9] != 0 {
+				break
+			}
 			if r.size == 0 {
 				if nonRes == 1 {
 					if off+0x38 <= len(rec) {
@@ -218,7 +223,9 @@ func parseMFTRecord(rec []byte) *mftRecord {
 	return r
 }
 
-// parseAttrList 解析 $ATTRIBUTE_LIST 内容，收集 $DATA 属性的扩展记录号
+// parseAttrList 解析 $ATTRIBUTE_LIST 内容：
+//   - 收集未命名 $DATA 属性的扩展记录号（用于补全文件大小）
+//   - 收集 FILE_NAME 属性的扩展记录号（用于补全目录/文件名与父引用）
 // 条目布局：0x00 type(4) 0x04 len(2) 0x06 nameLen(1) 0x07 nameOff(1)
 //          0x08 lowestVCN(8) 0x10 fileRef(8) 0x18 name...
 func parseAttrList(data []byte, r *mftRecord) {
@@ -228,10 +235,17 @@ func parseAttrList(data []byte, r *mftRecord) {
 		if recLen < 0x18 || off+recLen > len(data) {
 			break
 		}
-		if atype == attrTypeData {
-			extRef := binary.LittleEndian.Uint64(data[off+0x10:off+0x18]) & 0xFFFFFFFFFFFF
-			if extRef > 0 && uint32(extRef) != r.num {
-				r.dataExt = append(r.dataExt, uint32(extRef))
+		extRef := binary.LittleEndian.Uint64(data[off+0x10:off+0x18]) & 0xFFFFFFFFFFFF
+		if extRef > 0 && uint32(extRef) != r.num {
+			switch atype {
+			case attrTypeData:
+				// 仅收集未命名数据流的扩展记录（命名流不参与大小统计）
+				if data[off+6] == 0 {
+					r.dataExt = append(r.dataExt, uint32(extRef))
+				}
+			case attrTypeFileName:
+				// FILE_NAME 扩展记录：用于补全被拆分的文件名/父引用
+				r.nameExt = append(r.nameExt, uint32(extRef))
 			}
 		}
 		off += recLen

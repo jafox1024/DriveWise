@@ -37,6 +37,18 @@ var (
 // 立即返回，实际清理在后台 goroutine 中执行，前端可通过 GetWinSxSStatus 查询进度。
 // 需要管理员权限；耗时可能达数十分钟，期间不阻塞界面。
 func (c *CacheService) StartWinSxSClean() models.WinSxSCleanStatus {
+	return startWinSxSClean(false)
+}
+
+// StartWinSxSCleanResetBase 后台启动 WinSxS 激进清理（dism /StartComponentCleanup /ResetBase）。
+// 相比标准清理额外删除所有历史版本组件，释放更多空间，但「还原此 Windows 安装 / 组件回滚」将不可用，
+// 属破坏性操作——前端须二次确认后调用。状态/轮询/接口与标准清理完全共用。
+func (c *CacheService) StartWinSxSCleanResetBase() models.WinSxSCleanStatus {
+	return startWinSxSClean(true)
+}
+
+// startWinSxSClean 内部通用入口：resetBase 决定是否追加 /ResetBase。
+func startWinSxSClean(resetBase bool) models.WinSxSCleanStatus {
 	winsxsMu.Lock()
 	defer winsxsMu.Unlock()
 
@@ -47,8 +59,9 @@ func (c *CacheService) StartWinSxSClean() models.WinSxSCleanStatus {
 	winsxsStatus = models.WinSxSCleanStatus{
 		Running:   true,
 		StartedAt: winsxsStarted.Format("2006-01-02 15:04:05"),
+		ResetBase: resetBase,
 	}
-	go runWinSxSClean()
+	go runWinSxSClean(resetBase)
 	return winsxsStatus
 }
 
@@ -62,15 +75,27 @@ func (c *CacheService) GetWinSxSStatus() models.WinSxSCleanStatus {
 	return winsxsStatus
 }
 
-// runWinSxSClean 后台执行 dism 清理并写入状态
-func runWinSxSClean() {
+// runWinSxSClean 后台执行 dism 清理并写入状态。
+// 判定成功/失败综合看：退出码 + 输出文本。
+// Windows 下 dism 的行为：
+//  - 无管理员权限：快速返回，输出 "错误: 740 / 需要提升权限 / Elevation required"。
+//  - 权限 OK 且清理成功：输出 "操作成功完成 / The operation completed successfully."。
+//    少数情况（清理后需要重启）退出码为 3010，但文本仍含"成功完成"，应视为成功。
+//  - 权限 OK 但无组件可回收：输出 "The component cleanup was not successful" 等，视为失败。
+func runWinSxSClean(resetBase bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "dism.exe", "/Online", "/Cleanup-Image", "/StartComponentCleanup")
+	args := []string{"/Online", "/Cleanup-Image", "/StartComponentCleanup"}
+	if resetBase {
+		args = append(args, "/ResetBase")
+	}
+	cmd := exec.CommandContext(ctx, "dism.exe", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
-	text := decodeDismOutput(out)
+	text := strings.TrimSpace(decodeDismOutput(out))
+
+	success, needsAdmin, reason := classifyDism(text, err)
 
 	winsxsMu.Lock()
 	defer winsxsMu.Unlock()
@@ -78,20 +103,81 @@ func runWinSxSClean() {
 	winsxsStatus.Done = true
 	winsxsStatus.ElapsedSec = int64(time.Since(winsxsStarted).Seconds())
 	winsxsStatus.Output = firstLines(text, 60)
+	winsxsStatus.Success = success
+	switch {
+	case success:
+		if resetBase {
+			winsxsStatus.Message = "✅ 激进清理完成：历史版本组件已删除，Windows 已回收更多磁盘空间（此后组件回滚不可用）"
+		} else {
+			winsxsStatus.Message = "✅ 组件存储清理完成，Windows 已自动回收可用的磁盘空间"
+		}
+	case needsAdmin:
+		winsxsStatus.Message = "⚠️ 需要管理员权限：DISM /StartComponentCleanup 必须以管理员身份运行。" +
+			"请以管理员身份重新启动 DriveWise 再执行本操作。"
+		// 附加原始 dism 输出尾部辅助诊断
+		if reason != "" {
+			winsxsStatus.Message += "（" + firstLines(reason, 2) + "）"
+		}
+	default:
+		winsxsStatus.Message = "❌ 清理未成功：" + firstLines(reason, 3)
+	}
+}
+
+// classifyDism 综合判断 dism 输出：success / needsAdmin / 失败原因（输出尾部文本）。
+// 判定优先级：
+//  1. 显式失败码 / 权限不足（740 / elevation / 0x8007xxxx / access denied）→ needsAdmin 或 fail
+//  2. 显式成功语（"操作成功" / "completed successfully" / "Cleanup completed") → success
+//  3. 都没有时，用 err==nil 兜底（退出码 0 视为成功）
+func classifyDism(text string, err error) (success bool, needsAdmin bool, reason string) {
+	lower := strings.ToLower(text)
+	tail := reasonTail(text)
+	if tail == "" {
+		tail = err.Error()
+	}
+	// 1a) 权限不足（最常见：错误 740 / elevation required / 提升权限 / Administrator / access is denied）
+	if strings.Contains(text, "错误: 740") ||
+		strings.Contains(lower, "error: 740") ||
+		strings.Contains(lower, "elevation") ||
+		strings.Contains(text, "需要提升权限") ||
+		strings.Contains(text, "需要以管理员身份") ||
+		strings.Contains(lower, "administrator privileges") ||
+		strings.Contains(lower, "access is denied") {
+		return false, true, tail
+	}
+	// 1b) 其它错误码 / 显式失败
+	if strings.Contains(lower, "operation did not complete successfully") ||
+		strings.Contains(lower, "the operation was not successful") ||
+		strings.Contains(lower, "0x8007") ||
+		strings.Contains(lower, "component cleanup was not successful") ||
+		strings.Contains(text, "操作未成功") ||
+		strings.Contains(text, "清理未成功") {
+		return false, false, tail
+	}
+	// 2) 显式成功语
+	if strings.Contains(lower, "operation completed successfully") ||
+		strings.Contains(lower, "component cleanup was successful") ||
+		strings.Contains(text, "操作成功") ||
+		strings.Contains(text, "清理成功") ||
+		strings.Contains(text, "已成功完成") {
+		return true, false, ""
+	}
+	// 3) 兜底：以退出码为准（退出码 0，或无输出但进程正常退出）
 	if err == nil {
-		winsxsStatus.Success = true
-		winsxsStatus.Message = "组件存储清理完成，Windows 已自动回收可用的磁盘空间"
-		return
+		return true, false, ""
 	}
-	msg := strings.TrimSpace(text)
-	if msg == "" {
-		msg = err.Error()
+	return false, false, tail
+}
+
+// reasonTail 返回 dism 输出的最后 3 行（错误信息一般出现在末尾）
+func reasonTail(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
 	}
-	winsxsStatus.Success = false
-	winsxsStatus.Message = "❌ 清理未成功：" + firstLines(msg, 2)
-	if strings.Contains(strings.ToLower(msg), "elevated") || strings.Contains(msg, "管理员") || strings.Contains(msg, "权限") {
-		winsxsStatus.Message += "（请以管理员身份运行 DriveWise）"
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
 	}
+	return strings.TrimSpace(strings.Join(lines, " "))
 }
 
 // AnalyzeWinSxS 分析 Windows 组件存储（WinSxS），调用 dism /AnalyzeComponentStore

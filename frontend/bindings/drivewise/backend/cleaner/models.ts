@@ -12,7 +12,7 @@ export interface BackupEntry {
     "time": string;
 
     /**
-     * HKLM | HKCU
+     * HKLM | HKCU | HKCR
      */
     "regHive"?: string;
 
@@ -22,14 +22,24 @@ export interface BackupEntry {
     "regKey"?: string;
 
     /**
-     * 值名
+     * 值名（"" 表示键的默认值）
      */
     "regValue"?: string;
 
     /**
-     * 原值数据
+     * 原值数据（字符串/数字的可读形式）
      */
     "regData"?: string;
+
+    /**
+     * 原值类型（REG_*，0=旧版备份仅字符串）
+     */
+    "regKind"?: number;
+
+    /**
+     * 原值原始字节（按类型原样恢复）
+     */
+    "regBlob"?: string | null;
 
     /**
      * 原文件/目录路径

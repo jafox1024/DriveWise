@@ -1,6 +1,7 @@
 package cleaner
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -75,6 +76,44 @@ func (c *CacheService) CleanCacheItems(categoryName string, itemPaths []string) 
 	for _, def := range defaultCategories() {
 		if def.name != categoryName {
 			continue
+		}
+		// 数据保护型分类：仅允许删除空目录（整棵子树无任何文件），非空内容（聊天记录/办公文档）禁止清理
+		if def.dataOnly {
+			roots := resolvePaths(def.paths)
+			if len(roots) == 0 {
+				res.Errors = append(res.Errors, "未找到缓存分类: "+categoryName)
+				return res
+			}
+			for _, p := range itemPaths {
+				if !isWithinRoots(p, roots) {
+					res.Errors = append(res.Errors, p+": 路径超出分类范围，已拒绝")
+					continue
+				}
+				info, err := os.Lstat(p)
+				if err != nil {
+					res.Errors = append(res.Errors, p+": "+err.Error())
+					continue
+				}
+				if !info.IsDir() {
+					res.Errors = append(res.Errors, p+": 该分类为个人数据（聊天记录/办公文档），仅允许删除空目录，文件不可清理")
+					continue
+				}
+				// 实时校验：目录整棵子树无任何文件（仅空目录层级）才允许删除
+				_, count := fsutil.DirSize(p, 0)
+				if count > 0 {
+					res.Errors = append(res.Errors,
+						fmt.Sprintf("%s: 目录内包含 %d 个文件，属个人数据，禁止清理。请先清空内容后再删除空目录，或使用「软件迁移」", p, count))
+					continue
+				}
+				freed, err := removePath(p)
+				if err != nil {
+					res.Errors = append(res.Errors, p+": "+err.Error())
+					continue
+				}
+				res.FreedBytes += freed
+				res.FileCount++
+			}
+			return res
 		}
 		// 智能识别型：白名单 = 实时扫描出的残留项路径（精确匹配，保护最新版本）
 		if def.special {
@@ -179,7 +218,10 @@ func listTopItems(dir string, limit int) []models.CacheDetailItem {
 				}
 			}
 			if it.IsDir {
-				it.Size, _ = fsutil.DirSize(it.Path, 0)
+				var count int64
+				it.Size, count = fsutil.DirSize(it.Path, 0)
+				// 目录下无任何文件（仅空目录层级）→ 空壳目录，可安全删除
+				it.Empty = count == 0
 			}
 		}()
 	}

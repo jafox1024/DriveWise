@@ -22,6 +22,8 @@ type cacheCategoryDef struct {
 	selected     bool     // 默认选中
 	special      bool     // 智能识别型（升级残留等，需专用扫描逻辑）
 	admin        bool     // 需管理员权限（系统级目录）
+	dataOnly     bool     // 纯数据型（聊天记录/办公文档），禁止清理，仅提示迁移
+	migrateHint  string   // 数据保护型分类的迁移建议文案
 	desc         string   // 分类说明
 }
 
@@ -168,6 +170,67 @@ func defaultCategories() []cacheCategoryDef {
 			selected: false,
 			special:  true,
 		},
+		{
+			name: "大型应用缓存",
+			desc: "VS Code/Teams/Adobe 等大型应用的缓存、日志与崩溃报告，删除后应用会自动重建，可安全清理",
+			paths: []string{
+				// VS Code
+				localAppData + `\Code\Cache`,
+				localAppData + `\Code\CachedData`,
+				localAppData + `\Code\logs`,
+				localAppData + `\Code\Service Worker\CacheStorage`,
+				// Teams
+				localAppData + `\Microsoft\Teams\Cache`,
+				localAppData + `\Microsoft\Teams\Code Cache`,
+				localAppData + `\Microsoft\Teams\GPUCache`,
+				localAppData + `\Microsoft\Teams\logs`,
+				localAppData + `\Microsoft\Teams\CacheStorage`,
+				localAppData + `\Microsoft\Teams\Service Worker\CacheStorage`,
+				// Adobe 媒体缓存
+				appData + `\Adobe\Common\Media Cache`,
+				appData + `\Adobe\Common\Media Cache Files`,
+				localAppData + `\Adobe\*\Cache`,
+				localAppData + `\Adobe\*\logs`,
+				// 浏览器 Service Worker / Crashpad / ShaderCache
+				localAppData + `\Google\Chrome\User Data\*\Service Worker\CacheStorage`,
+				localAppData + `\Google\Chrome\User Data\*\Crashpad`,
+				localAppData + `\Google\Chrome\User Data\*\ShaderCache`,
+				localAppData + `\Microsoft\Edge\User Data\*\Service Worker\CacheStorage`,
+				localAppData + `\Microsoft\Edge\User Data\*\Crashpad`,
+				localAppData + `\Microsoft\Edge\User Data\*\ShaderCache`,
+				localAppData + `\Mozilla\Firefox\Profiles\*\crashes`,
+				// 旧 IE/系统 Internet 缓存
+				localAppData + `\Microsoft\Windows\INetCache`,
+				// 开发构建缓存
+				`%USERPROFILE%\.nuget\plugins`,
+				localAppData + `\NuGet\Cache`,
+				`%USERPROFILE%\.gradle\caches`,
+			},
+			selected: true,
+		},
+		{
+			name: "聊天与办公数据",
+			desc: "微信/QQ 聊天记录、接收的文件与办公文档。属于个人数据，DriveWise 不会清理，仅提示迁移",
+			paths: []string{
+				// 微信（旧版与新版 xwechat）
+				localAppData + `\Tencent\WeChat Files`,
+				localAppData + `\Tencent\xwechat`,
+				`%USERPROFILE%\Documents\xwechat_files`,
+				// QQ / TIM / 企业微信
+				localAppData + `\Tencent\QQ`,
+				localAppData + `\Tencent\TIM`,
+				`%USERPROFILE%\Documents\Tencent Files`,
+				`%USERPROFILE%\Documents\WXWork`,
+				// 办公文档：WPS 云文档 / OneDrive / WPS 自动备份
+				`%USERPROFILE%\Documents\WPS Cloud Files`,
+				`%USERPROFILE%\Documents\WPS Drive`,
+				`%USERPROFILE%\OneDrive`,
+				appData + `\Kingsoft\office6\backup`,
+			},
+			selected:    false,
+			dataOnly:    true,
+			migrateHint: "这些是微信/QQ 聊天记录与办公文档等个人数据，删除将导致数据永久丢失，DriveWise 禁止清理。如需释放 C 盘空间，请前往「软件迁移」页面将数据目录迁移到其他磁盘（会自动建立目录联接，原路径继续可用），或手动把整个目录移动到其他分区。",
+		},
 	}
 }
 
@@ -205,11 +268,13 @@ func (c *CacheService) ScanCache() []models.CacheCategory {
 	categories := make([]models.CacheCategory, 0, len(defaultCategories()))
 	for _, def := range defaultCategories() {
 		cat := models.CacheCategory{
-			Name:     def.name,
-			Selected: def.selected,
-			Special:  def.special,
-			Admin:    def.admin,
-			Desc:     def.desc,
+			Name:        def.name,
+			Selected:    def.selected,
+			Special:     def.special,
+			Admin:       def.admin,
+			DataOnly:    def.dataOnly,
+			MigrateHint: def.migrateHint,
+			Desc:        def.desc,
 		}
 		switch {
 		case def.special:
@@ -261,6 +326,15 @@ func (c *CacheService) CleanCache(names []string) []models.CleanResult {
 	results := make([]models.CleanResult, 0, len(names))
 	for _, def := range defaultCategories() {
 		if !want[def.name] {
+			continue
+		}
+		// 数据保护型分类：禁止清理（聊天记录/办公文档），仅返回拒绝提示
+		if def.dataOnly {
+			results = append(results, models.CleanResult{
+				Category:   def.name,
+				FreedBytes: 0,
+				Errors:     []string{def.name + ": 该分类为个人数据（聊天记录/办公文档），禁止清理。请通过「软件迁移」将数据目录迁移到其他磁盘"},
+			})
 			continue
 		}
 		switch {

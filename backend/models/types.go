@@ -10,7 +10,10 @@ type CacheCategory struct {
 	Exists    bool     `json:"exists"`    // 路径是否存在（存在才可扫描/清理）
 	Special   bool     `json:"special"`   // 是否智能识别型分类（升级残留等，需专用扫描）
 	Admin     bool     `json:"admin"`     // 是否需管理员权限（系统级目录）
-	Desc      string   `json:"desc"`      // 分类说明
+	DataOnly  bool     `json:"dataOnly"`  // 纯数据型分类（聊天记录/办公文档），禁止清理，仅提示迁移
+	// MigrateHint 数据保护型分类的迁移建议（DataOnly=true 时展示，告知用户如何安全释放空间）
+	MigrateHint string `json:"migrateHint"`
+	Desc        string `json:"desc"` // 分类说明
 }
 
 // CleanResult 单分类清理结果
@@ -36,6 +39,9 @@ type CacheDetailItem struct {
 	Size    int64  `json:"size"`    // 占用（目录为递归总大小）
 	IsDir   bool   `json:"isDir"`   // 是否目录
 	ModTime string `json:"modTime"` // 修改时间
+	// Empty 目录条目：整棵子树无任何文件（仅空目录层级），可安全删除。
+	// 用于数据保护分类：非空目录禁止清理，但空壳目录允许删除。
+	Empty bool `json:"empty"`
 }
 
 // CacheDetailPath 单个缓存路径的详情
@@ -54,7 +60,7 @@ type WinSxSAnalysis struct {
 	RawOutput       string `json:"rawOutput"`       // 原始输出（前若干行）
 }
 
-// WinSxSCleanStatus WinSxS 后台清理状态（StartWinSxSClean / GetWinSxSStatus）
+// WinSxSCleanStatus WinSxS 后台清理状态（StartWinSxSClean / StartWinSxSCleanResetBase / GetWinSxSStatus）
 type WinSxSCleanStatus struct {
 	Running    bool   `json:"running"`    // 是否正在后台清理
 	Done       bool   `json:"done"`       // 是否已完成（无论成败）
@@ -63,6 +69,25 @@ type WinSxSCleanStatus struct {
 	Output     string `json:"output"`     // dism 原始输出（前若干行）
 	StartedAt  string `json:"startedAt"`  // 开始时间（2006-01-02 15:04:05）
 	ElapsedSec int64  `json:"elapsedSec"` // 已耗时（秒）
+	ResetBase  bool   `json:"resetBase"`  // 本次是否为激进清理（/ResetBase，不可逆）
+}
+
+// OSUpgradeRemnant Windows 系统升级残留项（$WINDOWS.~BT / ~BS / ~WS / Windows.old）
+type OSUpgradeRemnant struct {
+	Name       string `json:"name"`       // 展示名
+	Path       string `json:"path"`       // 完整路径
+	Size       int64  `json:"size"`       // 占用（字节）
+	FileCount  int64  `json:"fileCount"`  // 文件数
+	NeedsAdmin bool   `json:"needsAdmin"` // 是否需要管理员（系统区，恒为 true）
+}
+
+// OSCleanItemResult 单个系统升级残留清理结果
+type OSCleanItemResult struct {
+	Name       string `json:"name"`       // 展示名
+	Path       string `json:"path"`       // 完整路径
+	Success    bool   `json:"success"`    // 是否清理成功
+	FreedBytes int64  `json:"freedBytes"` // 释放空间（字节）
+	Error      string `json:"error"`      // 失败说明
 }
 
 // DriveInfo 逻辑磁盘信息
@@ -109,19 +134,20 @@ type MigratableApp struct {
 
 // RogueItem 流氓软件扫描结果项
 type RogueItem struct {
-	ID        string `json:"id"`        // 唯一 ID（用于清理）
-	Name      string `json:"name"`      // 软件名
-	RuleType  string `json:"ruleType"`  // 匹配类型: registry | file | service | task | extension | installed | startup | process | shellex
-	Location  string `json:"location"`  // 位置描述
-	Path      string `json:"path"`      // 具体路径/注册表值/服务名/任务名
-	Value     string `json:"value"`     // 注册表值数据/显示名（如有）
-	RiskLevel string `json:"riskLevel"` // high | medium | low
-	Detail    string `json:"detail"`    // 说明
-	Impact    string `json:"impact"`    // 影响说明（用户可感知的行为）
-	Action    string `json:"action"`    // 处理方式: remove | disable_service | disable_task | remove_extension | hint
-	Selected  bool   `json:"selected"`  // 是否选中清理
-	Running   bool   `json:"running"`   // 相关进程是否正在运行（需先终止）
-	PID       int    `json:"pid"`       // 相关进程 PID（如有）
+	ID          string `json:"id"`          // 唯一 ID（用于清理）
+	Name        string `json:"name"`        // 软件名
+	RuleType    string `json:"ruleType"`    // 匹配类型: registry | file | service | task | extension | installed | startup | process | shellex | browser | hosts | shortcut
+	Location    string `json:"location"`    // 位置描述
+	Path        string `json:"path"`        // 具体路径/注册表值/服务名/任务名
+	Value       string `json:"value"`       // 注册表值数据/显示名（如有）
+	RepairValue string `json:"repairValue"` // 修复后的目标值（Action=repair 时应用，如 Userinit 系统默认值）
+	RiskLevel   string `json:"riskLevel"`   // high | medium | low
+	Detail      string `json:"detail"`      // 说明
+	Impact      string `json:"impact"`      // 影响说明（用户可感知的行为）
+	Action      string `json:"action"`      // 处理方式: remove | disable_service | disable_task | remove_extension | repair | hint | kill
+	Selected    bool   `json:"selected"`    // 是否选中清理
+	Running     bool   `json:"running"`     // 相关进程是否正在运行（需先终止）
+	PID         int    `json:"pid"`         // 相关进程 PID（如有）
 }
 
 // RogueCleanResult 清理结果

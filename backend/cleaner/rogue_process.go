@@ -3,10 +3,9 @@ package cleaner
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -19,6 +18,7 @@ import (
 // processInfo 运行中的进程信息
 type processInfo struct {
 	pid  uint32
+	ppid uint32 // 父进程 PID（用于构造进程树，杀子进程）
 	name string
 	path string
 }
@@ -65,7 +65,7 @@ func snapshotProcesses() []processInfo {
 	entry.Size = uint32(unsafe.Sizeof(entry))
 	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
 		name := windows.UTF16ToString(entry.ExeFile[:])
-		p := processInfo{pid: entry.ProcessID, name: name}
+		p := processInfo{pid: entry.ProcessID, ppid: entry.ParentProcessID, name: name}
 		if h, oerr := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, entry.ProcessID); oerr == nil {
 			var buf [512]uint16
 			var size = uint32(len(buf))
@@ -94,7 +94,9 @@ func scanProcesses() []models.RogueItem {
 		// 高置信规则匹配（仅明确流氓组件词，避免正常软件误报）
 		if rule := matchHighRisk(p.name + " " + p.path); rule != nil {
 			items = append(items, models.RogueItem{
-				ID:        genID("process", p.name, fmt.Sprint(p.pid)),
+				// ID 用 name+path 而非 PID：清理时后端会重新扫描，
+				// PID 变化/进程重启会导致 ID 失配（“未找到对应项目”）而无法执行清理
+				ID:        genID("process", p.name, p.path),
 				Name:      rule.Name,
 				RuleType:  "process",
 				Location:  "运行中进程",
@@ -103,7 +105,7 @@ func scanProcesses() []models.RogueItem {
 				RiskLevel: "high",
 				Detail:    "进程正在运行：进程名命中规则",
 				Impact:    rule.Impact,
-				Action:    "hint",
+				Action:    "kill", // 可执行动作：结束进程
 				Selected:  false,
 				Running:   true,
 				PID:       int(p.pid),
@@ -113,7 +115,7 @@ func scanProcesses() []models.RogueItem {
 		// 路径命中黑名单目录
 		if p.path != "" && (rules.IsBlacklistedDir(filepath.Base(filepath.Dir(p.path))) || rules.IsBlacklistedPath(p.path)) {
 			items = append(items, models.RogueItem{
-				ID:        genID("process", p.name, fmt.Sprint(p.pid)),
+				ID:        genID("process", p.name, p.path),
 				Name:      p.name,
 				RuleType:  "process",
 				Location:  "运行中进程（黑名单目录）",
@@ -122,7 +124,7 @@ func scanProcesses() []models.RogueItem {
 				RiskLevel: "medium",
 				Detail:    "进程运行于黑名单目录",
 				Impact:    "已知流氓软件目录中的进程，可能常驻后台/弹窗/自动下载",
-				Action:    "hint",
+				Action:    "kill",
 				Selected:  false,
 				Running:   true,
 				PID:       int(p.pid),
@@ -225,14 +227,14 @@ func scanShellEx() []models.RogueItem {
 				items = append(items, models.RogueItem{
 					ID:        genID("shellex", "AppInit_DLLs", val),
 					Name:      rule.Name,
-					RuleType:  "shellex",
+					RuleType:  "registry",
 					Location:  "全局 DLL 注入（AppInit_DLLs）",
-					Path:      t.path,
+					Path:      "HKLM\\" + t.path + `\AppInit_DLLs`,
 					Value:     val,
 					RiskLevel: "high",
 					Detail:    "AppInit_DLLs 全局注入: " + val,
 					Impact:    "注入所有加载 user32.dll 的进程，危害极大",
-					Action:    "hint",
+					Action:    "remove",
 					Selected:  false,
 				})
 			}
@@ -262,31 +264,138 @@ func resolveCLSIDServer(clsid string) string {
 	return val
 }
 
-// killProcessesByKeyword 终止所有名称或路径命中关键词的进程（taskkill /F /T 强杀进程树）
+// terminateProcessByPID 直接通过系统 API 结束进程。
+// 不使用 taskkill.exe：安全软件常把 taskkill/rundll32 等工具当作 LOLBin 静默拦截，
+// 导致外部 exe 调用看似成功、进程却未被结束（本项目实测过的坑）。
+func terminateProcessByPID(pid uint32) error {
+	if pid == 0 || pid == 4 { // System / System Idle 保护
+		return fmt.Errorf("拒绝结束系统进程 PID=%d", pid)
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	return windows.TerminateProcess(h, 1)
+}
+
+// appendUnique 去重追加
+func appendUnique(list []string, v string) []string {
+	for _, e := range list {
+		if e == v {
+			return list
+		}
+	}
+	return append(list, v)
+}
+
+// collectSubtree 收集 roots 及其全部子孙进程 PID（按 ppid 关系，广度优先）。
+// 用于把守护/子进程一锅端，避免只杀主进程后子进程继续存活或守护进程被拉起。
+func collectSubtree(procs []processInfo, roots map[uint32]bool) []uint32 {
+	children := map[uint32][]uint32{}
+	for _, p := range procs {
+		if p.ppid != 0 && p.ppid != p.pid {
+			children[p.ppid] = append(children[p.ppid], p.pid)
+		}
+	}
+	var order []uint32
+	seen := map[uint32]bool{}
+	var walk func(pid uint32)
+	walk = func(pid uint32) {
+		if seen[pid] {
+			return
+		}
+		seen[pid] = true
+		order = append(order, pid)
+		for _, c := range children[pid] {
+			walk(c)
+		}
+	}
+	// 按 PID 升序遍历 roots，保证顺序稳定
+	pids := make([]uint32, 0, len(roots))
+	for pid := range roots {
+		pids = append(pids, pid)
+	}
+	sort.Slice(pids, func(i, j int) bool { return pids[i] < pids[j] })
+	for _, pid := range pids {
+		walk(pid)
+	}
+	return order
+}
+
+// killProcessesByKeyword 终止所有名称或路径命中关键词的进程及其进程树
+// 返回实际被结束的进程名列表（去重）
 func killProcessesByKeyword(keyword string) []string {
 	var killed []string
 	procs := snapshotProcesses()
+	if len(procs) == 0 {
+		return nil
+	}
 	lower := strings.ToLower(keyword)
+	roots := map[uint32]bool{}
+	byPID := map[uint32]string{}
 	for _, p := range procs {
-		haystack := strings.ToLower(p.name + " " + p.path)
-		if !strings.Contains(haystack, lower) {
-			continue
-		}
+		byPID[p.pid] = p.name
 		if isSystemProcess(p.name) {
 			continue
 		}
-		if err := taskkill(p.pid, p.name); err == nil {
-			killed = append(killed, p.name)
+		haystack := strings.ToLower(p.name + " " + p.path)
+		if strings.Contains(haystack, lower) {
+			roots[p.pid] = true
+		}
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	order := collectSubtree(procs, roots)
+	// 先杀子孙后杀祖先：父先死会导致子进程被孤儿化并可能被守护逻辑接管
+	for i := len(order) - 1; i >= 0; i-- {
+		if err := terminateProcessByPID(order[i]); err == nil {
+			if name, ok := byPID[order[i]]; ok {
+				killed = appendUnique(killed, name)
+			}
 		}
 	}
 	return killed
 }
 
-// taskkill 强制终止进程及其子进程树
-func taskkill(pid uint32, name string) error {
-	cmd := exec.Command("taskkill.exe", "/PID", fmt.Sprint(pid), "/F", "/T")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Run()
+// killProcessesUnderDir 终止运行于指定目录（含子目录）下的所有进程及其进程树。
+// 用途：清理目录类流氓软件时，目录内的 exe 常驻运行会占用文件句柄，导致整体
+// 迁移（os.Rename 隔离）失败；先按“进程完整路径前缀”定位并结束它们再清理。
+func killProcessesUnderDir(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	prefix := strings.ToLower(filepath.Clean(dir)) + `\`
+	var killed []string
+	procs := snapshotProcesses()
+	if len(procs) == 0 {
+		return nil
+	}
+	roots := map[uint32]bool{}
+	byPID := map[uint32]string{}
+	for _, p := range procs {
+		if p.path == "" || p.pid <= 4 || isSystemProcess(p.name) {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(filepath.Clean(p.path)), prefix) {
+			roots[p.pid] = true
+			byPID[p.pid] = p.name
+		}
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	order := collectSubtree(procs, roots)
+	// 先杀子孙后杀祖先
+	for i := len(order) - 1; i >= 0; i-- {
+		if err := terminateProcessByPID(order[i]); err == nil {
+			if name, ok := byPID[order[i]]; ok {
+				killed = appendUnique(killed, name)
+			}
+		}
+	}
+	return killed
 }
 
 // processRunningByName 检查是否存在匹配关键词的进程

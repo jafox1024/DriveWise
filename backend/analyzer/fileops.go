@@ -12,40 +12,8 @@ import (
 	"drivewise/backend/internal/fsutil"
 )
 
-// SHFileOpStruct SHFILEOPSTRUCT 常量已弃用（改用 PowerShell 回收站 API）
-const (
-	foDelete        = 0x0003
-	fofAllowUndo    = 0x0040
-	fofNoConfirmation = 0x0010
-	fofSilent       = 0x0004
-	fofNoErrorUI    = 0x0400
-	shFileOpSuccess = 0
-)
-
-// OpenInExplorer 在资源管理器中打开目录（或定位选中文件）
-// 目录使用 rundll32 url.dll 协议处理器：提权进程也能以普通用户会话打开资源管理器
-// （直接 spawn explorer.exe 在提权环境下常出现窗口不显示的问题）
-func (s *AnalyzerService) OpenInExplorer(path string) error {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	abs = filepath.Clean(abs)
-
-	if info, lerr := os.Lstat(abs); lerr == nil && !info.IsDir() {
-		// 文件：explorer /select 定位并选中
-		cmd := exec.Command("explorer.exe", `/select,`+abs)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		return cmd.Start()
-	}
-	// 目录：去掉尾部反斜杠（explorer 对 "C:\dir\" 这类路径处理异常），委托 Shell 打开
-	if !strings.EqualFold(abs, filepath.VolumeName(abs)+`\`) {
-		abs = strings.TrimRight(abs, `\/`)
-	}
-	cmd := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", abs)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Start()
-}
+// 说明：OpenInExplorer 的健壮实现（ShellExecuteW + Medium IL 降权回退）见
+// open_explorer_win.go。
 
 // DeletePath 将文件/目录移入回收站（非永久删除）。
 // 安全保护：禁止删除磁盘根目录与系统关键目录；返回被删除对象的占用空间。

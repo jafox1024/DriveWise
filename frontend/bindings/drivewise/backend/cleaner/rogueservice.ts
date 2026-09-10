@@ -19,10 +19,22 @@ import * as models$0 from "../models/models.js";
 import * as $models from "./models.js";
 
 /**
- * CleanRogue 清理选中项并记录备份
+ * CleanRogue 清理选中项（按 ID，兼容旧调用）。
+ * 说明：先重新扫描再按 ID 匹配会引入“进程退出/目录消失 → ID 失配 → 找不到对应项目”
+ * 与全量重扫耗时问题；新调用方请优先使用 CleanRogueItems（直接传扫描结果对象）。
  */
 export function CleanRogue(ids: string[] | null): $CancellablePromise<models$0.RogueCleanResult[] | null> {
     return $Call.ByID(3946819275, ids);
+}
+
+/**
+ * CleanRogueItems 按扫描结果对象直接清理选中项（推荐）。
+ * 相比 CleanRogue(ids)：
+ *  1. 不再依赖清理前的全量重扫，速度快且不受“进程重启/目录消失导致 ID 失配”影响；
+ *  2. 单项失败原因精确返回（权限、占用、黑名单不符等），便于 UI 逐条提示。
+ */
+export function CleanRogueItems(items: models$0.RogueItem[] | null): $CancellablePromise<models$0.RogueCleanResult[] | null> {
+    return $Call.ByID(352386637, items);
 }
 
 /**
@@ -49,7 +61,8 @@ export function RestoreRogue(ids: string[] | null): $CancellablePromise<models$0
 /**
  * ScanRogue 扫描流氓/推广软件组件
  * 覆盖：启动项/启动文件夹/服务/计划任务/浏览器扩展/已装软件/黑名单目录/
- *      运行中进程/Shell 扩展注入点
+ *      运行中进程/Shell 扩展注入点/签名黑名单/系统启动劫持点/
+ *      浏览器主页与搜索劫持/隐蔽自启点(Userinit 等)/Hosts 劫持/快捷方式参数注入
  */
 export function ScanRogue(): $CancellablePromise<models$0.RogueItem[] | null> {
     return $Call.ByID(2585258155);

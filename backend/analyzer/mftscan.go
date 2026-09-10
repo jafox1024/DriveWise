@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -54,7 +55,9 @@ func scanMFTVolume(drive string) (*models.FileNode, error) {
 			rec := block[i : i+p.recSize]
 			if len(rec) >= 4 && string(rec[0:4]) == "FILE" {
 				applyFixup(rec)
-				if r := parseMFTRecord(rec); r != nil && (r.name != "" || r.num == 5) {
+				// 全部保留（含 name 为空的记录）：第二遍会用 $ATTRIBUTE_LIST 补全名字/大小，
+				// 提前过滤会把整棵子树丢掉
+				if r := parseMFTRecord(rec); r != nil {
 					records = append(records, r)
 				}
 			}
@@ -62,13 +65,28 @@ func scanMFTVolume(drive string) (*models.FileNode, error) {
 		off += int64(n)
 	}
 
-	// 第二遍：$ATTRIBUTE_LIST 扩展记录补全文件大小
+	// 第二遍：$ATTRIBUTE_LIST 扩展记录补全
+	//  - 文件大小：未命名 $DATA 拆分到扩展记录时，逐个读取取最大 size（各 extent 记录均携带全流大小）
+	//  - 文件名/父引用：FILE_NAME 拆分到扩展记录时，读回名字与父目录记录号，避免子树丢失
 	extBuf := make([]byte, p.recSize)
 	for _, r := range records {
 		if r.size == 0 && len(r.dataExt) > 0 {
-			if err := p.readRecord(r.dataExt[0], extBuf); err == nil {
-				if er := parseMFTRecord(extBuf); er != nil && er.size > 0 {
-					r.size = er.size
+			for _, ext := range r.dataExt {
+				if err := p.readRecord(ext, extBuf); err == nil {
+					if er := parseMFTRecord(extBuf); er != nil && er.size > r.size {
+						r.size = er.size
+					}
+				}
+			}
+		}
+		if r.name == "" && len(r.nameExt) > 0 {
+			for _, ext := range r.nameExt {
+				if err := p.readRecord(ext, extBuf); err == nil {
+					if er := parseMFTRecord(extBuf); er != nil && er.name != "" {
+						r.name = er.name
+						r.parent = er.parent
+						break
+					}
 				}
 			}
 		}
@@ -113,7 +131,14 @@ func buildMFTPathTree(records []*mftRecord, drive string) *models.FileNode {
 	// 记录号 -> 节点
 	byNum := make(map[uint32]*models.FileNode, len(records)+16)
 	for _, r := range records {
-		node := &models.FileNode{Name: r.name, IsDir: r.isDir, Size: r.size}
+		if r.name == "" && !r.isDir {
+			continue // 补名失败的文件记录丢弃（正常情况不会发生）
+		}
+		name := r.name
+		if name == "" {
+			name = fmt.Sprintf("#%d", r.num) // 目录名缺失占位：保留为父节点，避免子树丢失
+		}
+		node := &models.FileNode{Name: name, IsDir: r.isDir, Size: r.size}
 		byNum[r.num] = node
 	}
 

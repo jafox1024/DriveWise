@@ -1,16 +1,36 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { RogueService } from "../../bindings/drivewise/backend/cleaner";
+import { AnalyzerService } from "../../bindings/drivewise/backend/analyzer";
+import { SysService } from "../../bindings/drivewise/backend/sysinfo";
 import type { BlacklistInfo, RogueItem } from "../../bindings/drivewise/backend/models";
 import type { BackupEntry } from "../../bindings/drivewise/backend/cleaner/models";
+import AppModal from "../components/AppModal.vue";
+
+const props = defineProps<{ isAdmin?: boolean }>();
 
 const items = ref<RogueItem[]>([]);
 const backups = ref<BackupEntry[]>([]);
 const scanning = ref(false);
 const cleaning = ref(false);
 const restoring = ref(false);
+const restarting = ref(false);
 const message = ref<{ type: "ok" | "err"; text: string } | null>(null);
 const showBackups = ref(false);
+
+/* ========== 单条「清理该项」确认弹窗 ========== */
+const itemConfirmOpen = ref(false);
+const itemDeleting = ref(false);
+const pendingItem = ref<RogueItem | null>(null);
+
+/** 有真实本地文件/目录路径、可“打开位置”的类型 */
+const openableTypes = new Set(["dir", "startup", "file", "hosts", "shortcut", "process"]);
+function canOpen(item: RogueItem): boolean {
+  return openableTypes.has(item.ruleType) && !!item.path;
+}
+
+/** 当前是否为管理员（未检测完成前按 true 处理，避免闪烁误导） */
+const isAdmin = computed(() => props.isAdmin !== false);
 
 /* 黑名单更新状态 */
 const blacklist = ref<BlacklistInfo | null>(null);
@@ -18,6 +38,40 @@ const updating = ref(false);
 const updateMsg = ref("");
 
 const selectedCount = computed(() => items.value.filter((i) => i.selected).length);
+
+/** 需要管理员才能执行的类型（HKLM/系统目录） */
+const adminRuleTypes = new Set(["service", "task", "shellex", "dir", "hosts"]);
+/** 需管理员判断：类型命中，或注册表路径在 HKLM/HKCR（写系统配置需提权） */
+function needsAdmin(item: RogueItem): boolean {
+  if (adminRuleTypes.has(item.ruleType)) return true;
+  if (item.ruleType === "registry" || item.ruleType === "extension" || item.ruleType === "browser") {
+    const p = item.path || "";
+    if (p.startsWith("HKLM") || p.startsWith("HKCR")) return true;
+  }
+  // 公共桌面等系统共享位置的快捷方式修复需要管理员
+  if (item.ruleType === "shortcut" && (item.path || "").includes("Users\\Public")) return true;
+  return false;
+}
+/** 仅提示、不可一键清理 */
+function isHint(item: RogueItem): boolean {
+  return item.action === "hint";
+}
+/** 该勾选项说明：仅提示 / 需管理员 / 可清理 */
+function checkTip(item: RogueItem): string {
+  if (isHint(item)) return "此项目仅提示，不参与一键清理，请按说明在系统设置中处理";
+  if (needsAdmin(item)) return "此操作需要管理员权限，普通权限下会失败";
+  return "";
+}
+
+async function restartAsAdmin() {
+  restarting.value = true;
+  try {
+    await SysService.RestartAsAdmin();
+  } catch (e) {
+    restarting.value = false;
+    message.value = { type: "err", text: `提权重启失败：${String(e)}` };
+  }
+}
 
 onMounted(async () => {
   try {
@@ -59,16 +113,20 @@ const riskLabel: Record<string, string> = {
 
 const actionStyle: Record<string, string> = {
   remove: "bg-red-50 text-red-600",
+  kill: "bg-red-50 text-red-600",
   disable_service: "bg-orange-50 text-orange-600",
   disable_task: "bg-orange-50 text-orange-600",
   remove_extension: "bg-purple-50 text-purple-600",
+  repair: "bg-emerald-50 text-emerald-600",
   hint: "bg-slate-100 text-slate-500",
 };
 const actionLabel: Record<string, string> = {
   remove: "删除",
+  kill: "结束进程",
   disable_service: "禁用服务",
   disable_task: "禁用任务",
   remove_extension: "移除扩展",
+  repair: "修复",
   hint: "仅提示",
 };
 
@@ -85,29 +143,80 @@ async function scan() {
 }
 
 async function clean() {
-  const ids = items.value.filter((i) => i.selected).map((i) => i.id);
-  if (!ids.length) return;
+  const selected = items.value.filter((i) => i.selected);
+  if (!selected.length) return;
   cleaning.value = true;
   message.value = null;
   try {
-    const results = (await RogueService.CleanRogue(ids)) ?? [];
-    const failed = results.filter((r) => !r.ok);
-    if (failed.length) {
-      message.value = {
-        type: "err",
-        text: `清理完成，${failed.length} 项失败：${failed[0].errMsg}`,
-      };
-    } else {
-      message.value = { type: "ok", text: `已清理 ${results.length} 项，可在下方「恢复记录」中找回` };
-    }
-    items.value = [];
-    await loadBackups();
+    const results = (await RogueService.CleanRogueItems(selected)) ?? [];
+    showCleanResults(results);
     // 清理后自动复扫（对抗自动重装/自愈的流氓软件，检查残留）
     await scan();
+    await loadBackups();
   } catch (e) {
     message.value = { type: "err", text: `清理失败：${String(e)}` };
   } finally {
     cleaning.value = false;
+  }
+}
+
+/** 展示批量/单条清理结果汇总 */
+function showCleanResults(results: { ok: boolean; errMsg?: string }[]) {
+  const ok = results.filter((r) => r.ok);
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length === 0) {
+    message.value = { type: "ok", text: `已清理 ${ok.length} 项，可在「恢复记录」中找回` };
+  } else if (ok.length === 0) {
+    const reasons = [...new Set(failed.map((f) => f.errMsg))].slice(0, 3);
+    message.value = {
+      type: "err",
+      text: `${failed.length} 项清理失败：${reasons.join("；")}${failed.length > 3 ? "…" : ""}`,
+    };
+  } else {
+    const reasons = [...new Set(failed.map((f) => f.errMsg))].slice(0, 2);
+    message.value = {
+      type: "err",
+      text: `已清理 ${ok.length} 项，${failed.length} 项失败：${reasons.join("；")}`,
+    };
+  }
+}
+
+/** 打开该条对应的目录 / 文件所在位置（借助磁盘分析页的打开实现） */
+async function openLocation(item: RogueItem) {
+  message.value = null;
+  try {
+    await AnalyzerService.OpenInExplorer(item.path);
+  } catch (e) {
+    message.value = { type: "err", text: `打开失败：${String(e)}` };
+  }
+}
+
+/** 请求单条清理（弹确认） */
+function requestItemClean(item: RogueItem) {
+  if (item.action === "hint") return;
+  pendingItem.value = item;
+  itemConfirmOpen.value = true;
+}
+
+/** 执行单条清理（dir/file/startup 会先结束占用进程再备份隔离，可恢复） */
+async function confirmItemClean() {
+  const item = pendingItem.value;
+  if (!item) return;
+  itemDeleting.value = true;
+  message.value = null;
+  try {
+    const results = (await RogueService.CleanRogueItems([item])) ?? [];
+    showCleanResults(results);
+    if (results[0]?.ok) {
+      items.value = items.value.filter((i) => i.id !== item.id);
+    }
+    await loadBackups();
+  } catch (e) {
+    message.value = { type: "err", text: `清理失败：${String(e)}` };
+  } finally {
+    itemDeleting.value = false;
+    itemConfirmOpen.value = false;
+    pendingItem.value = null;
   }
 }
 
@@ -124,7 +233,10 @@ async function restore(id: string) {
       message.value = { type: "ok", text: "已恢复" };
       await loadBackups();
     } else {
-      message.value = { type: "err", text: "恢复失败" };
+      message.value = {
+        type: "err",
+        text: `恢复失败：${results[0]?.errMsg || "请确认以管理员身份运行后重试"}`,
+      };
     }
   } catch (e) {
     message.value = { type: "err", text: `恢复失败：${String(e)}` };
@@ -139,9 +251,27 @@ async function restore(id: string) {
     <header class="mb-6">
       <h1 class="text-2xl font-bold text-slate-800">流氓软件清理</h1>
       <p class="mt-1 text-sm text-slate-500">
-        扫描注册表启动项、服务、计划任务、浏览器扩展与已装软件，识别推广/广告/捆绑组件。所有项目默认不勾选，清理前先备份，可随时恢复。
+        扫描启动项、服务、计划任务、浏览器主页/扩展劫持、隐蔽自启点（Userinit 等）、Hosts 篡改与快捷方式参数注入，识别推广/广告/捆绑组件。所有项目默认不勾选，清理前先备份，可随时恢复。
       </p>
     </header>
+
+    <!-- 非管理员提示 -->
+    <div
+      v-if="!isAdmin"
+      class="mb-5 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+    >
+      <div>
+        <span class="font-medium">当前为普通权限：</span>
+        禁用服务、计划任务、HKLM 注册表启动项与系统目录清理都需要管理员权限，普通权限下这些项目会清理失败。可先扫描查看，再以管理员身份重启后清理。
+      </div>
+      <button
+        class="shrink-0 rounded-lg bg-amber-500 px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-60"
+        :disabled="restarting"
+        @click="restartAsAdmin"
+      >
+        {{ restarting ? "正在请求提权..." : "以管理员身份重启" }}
+      </button>
+    </div>
 
     <!-- 黑名单状态与更新 -->
     <div class="mb-5 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -227,7 +357,7 @@ async function restore(id: string) {
             <div class="truncate text-xs text-slate-400">
               <template v-if="b.ruleType === 'service'">服务：{{ b.serviceName }}</template>
               <template v-else-if="b.ruleType === 'task'">计划任务：{{ b.taskName }}</template>
-              <template v-else-if="b.ruleType === 'registry' || b.ruleType === 'extension'">{{ b.regHive }}\{{ b.regKey }}\{{ b.regValue }}</template>
+              <template v-else-if="b.ruleType === 'registry' || b.ruleType === 'extension' || b.ruleType === 'browser'">{{ b.regHive }}\{{ b.regKey }}\{{ b.regValue }}</template>
               <template v-else>{{ b.origPath }}</template>
             </div>
           </div>
@@ -261,11 +391,27 @@ async function restore(id: string) {
           <input
             type="checkbox"
             v-model="item.selected"
-            class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            :disabled="isHint(item)"
+            :title="checkTip(item)"
+            class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
           />
           <div class="min-w-0 flex-1">
             <div class="flex flex-wrap items-center gap-2">
               <span class="text-sm font-semibold text-slate-700">{{ item.name }}</span>
+              <span
+                v-if="isHint(item)"
+                class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500"
+                title="此项目仅提示，不参与一键清理，请按说明在系统设置中处理"
+              >
+                仅提示·不可一键清理
+              </span>
+              <span
+                v-else-if="needsAdmin(item)"
+                class="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-600"
+                title="此操作需要管理员权限，普通权限下会清理失败"
+              >
+                需管理员
+              </span>
               <span
                 v-if="item.running"
                 class="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-600"
@@ -294,8 +440,53 @@ async function restore(id: string) {
               ⚠️ {{ item.impact }}
             </div>
           </div>
+          <!-- 行内快捷操作：打开位置 / 单条清理 -->
+          <div class="flex shrink-0 flex-col items-stretch gap-1.5 pl-1">
+            <button
+              v-if="canOpen(item)"
+              class="rounded-md border border-slate-300 px-2.5 py-1 text-xs text-slate-600 transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700"
+              title="在资源管理器中打开该目录 / 定位该文件"
+              @click="openLocation(item)"
+            >
+              📂 打开位置
+            </button>
+            <button
+              v-if="item.action !== 'hint'"
+              class="rounded-md border border-red-200 px-2.5 py-1 text-xs text-red-600 transition-colors hover:bg-red-50"
+              title="备份后隔离/禁用/修复该项（可在恢复记录中找回）"
+              @click="requestItemClean(item)"
+            >
+              🗑️ 清理该项
+            </button>
+          </div>
         </div>
       </div>
     </div>
+
+    <!-- 单条清理确认弹窗 -->
+    <AppModal
+      :open="itemConfirmOpen"
+      title="确认清理该项"
+      subtitle="清理前会自动备份，可在「恢复记录」中一键找回"
+      confirm-text="确认清理"
+      tone="danger"
+      :loading="itemDeleting"
+      @confirm="confirmItemClean"
+      @cancel="itemConfirmOpen = false; pendingItem = null"
+    >
+      <template v-if="pendingItem">
+        <div class="rounded-xl bg-slate-50 p-3">
+          <div class="text-xs text-slate-400">{{ pendingItem.location }}</div>
+          <div class="mt-0.5 text-sm font-semibold text-slate-700">{{ pendingItem.name }}</div>
+          <div class="mt-0.5 break-all font-mono text-xs text-slate-500">{{ pendingItem.path || pendingItem.value }}</div>
+        </div>
+        <p v-if="pendingItem.ruleType === 'process'" class="mt-3 rounded-lg bg-amber-50 p-2 text-xs text-amber-700">
+          进程类项目将直接结束相关进程（无备份）；其自启动项需另行清理。
+        </p>
+        <p class="mt-3 text-xs text-slate-500">
+          目录/文件/注册表项将先备份再隔离，恢复记录中可还原。
+        </p>
+      </template>
+    </AppModal>
   </div>
 </template>

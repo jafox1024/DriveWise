@@ -121,6 +121,16 @@ export interface CacheCategory {
     "admin": boolean;
 
     /**
+     * 纯数据型分类（聊天记录/办公文档），禁止清理，仅提示迁移
+     */
+    "dataOnly": boolean;
+
+    /**
+     * MigrateHint 数据保护型分类的迁移建议（DataOnly=true 时展示，告知用户如何安全释放空间）
+     */
+    "migrateHint": string;
+
+    /**
      * 分类说明
      */
     "desc": string;
@@ -154,6 +164,12 @@ export interface CacheDetailItem {
      * 修改时间
      */
     "modTime": string;
+
+    /**
+     * Empty 目录条目：整棵子树无任何文件（仅空目录层级），可安全删除。
+     * 用于数据保护分类：非空目录禁止清理，但空壳目录允许删除。
+     */
+    "empty": boolean;
 }
 
 /**
@@ -317,6 +333,66 @@ export interface MigratableApp {
 }
 
 /**
+ * OSCleanItemResult 单个系统升级残留清理结果
+ */
+export interface OSCleanItemResult {
+    /**
+     * 展示名
+     */
+    "name": string;
+
+    /**
+     * 完整路径
+     */
+    "path": string;
+
+    /**
+     * 是否清理成功
+     */
+    "success": boolean;
+
+    /**
+     * 释放空间（字节）
+     */
+    "freedBytes": number;
+
+    /**
+     * 失败说明
+     */
+    "error": string;
+}
+
+/**
+ * OSUpgradeRemnant Windows 系统升级残留项（$WINDOWS.~BT / ~BS / ~WS / Windows.old）
+ */
+export interface OSUpgradeRemnant {
+    /**
+     * 展示名
+     */
+    "name": string;
+
+    /**
+     * 完整路径
+     */
+    "path": string;
+
+    /**
+     * 占用（字节）
+     */
+    "size": number;
+
+    /**
+     * 文件数
+     */
+    "fileCount": number;
+
+    /**
+     * 是否需要管理员（系统区，恒为 true）
+     */
+    "needsAdmin": boolean;
+}
+
+/**
  * RogueCleanResult 清理结果
  */
 export interface RogueCleanResult {
@@ -351,7 +427,7 @@ export interface RogueItem {
     "name": string;
 
     /**
-     * 匹配类型: registry | file | service | task | extension | installed | startup | process | shellex
+     * 匹配类型: registry | file | service | task | extension | installed | startup | process | shellex | browser | hosts | shortcut
      */
     "ruleType": string;
 
@@ -371,6 +447,11 @@ export interface RogueItem {
     "value": string;
 
     /**
+     * 修复后的目标值（Action=repair 时应用，如 Userinit 系统默认值）
+     */
+    "repairValue": string;
+
+    /**
      * high | medium | low
      */
     "riskLevel": string;
@@ -386,7 +467,7 @@ export interface RogueItem {
     "impact": string;
 
     /**
-     * 处理方式: remove | disable_service | disable_task | remove_extension | hint
+     * 处理方式: remove | disable_service | disable_task | remove_extension | repair | hint | kill
      */
     "action": string;
 
@@ -498,7 +579,7 @@ export interface WinSxSAnalysis {
 }
 
 /**
- * WinSxSCleanStatus WinSxS 后台清理状态（StartWinSxSClean / GetWinSxSStatus）
+ * WinSxSCleanStatus WinSxS 后台清理状态（StartWinSxSClean / StartWinSxSCleanResetBase / GetWinSxSStatus）
  */
 export interface WinSxSCleanStatus {
     /**
@@ -535,4 +616,9 @@ export interface WinSxSCleanStatus {
      * 已耗时（秒）
      */
     "elapsedSec": number;
+
+    /**
+     * 本次是否为激进清理（/ResetBase，不可逆）
+     */
+    "resetBase": boolean;
 }
