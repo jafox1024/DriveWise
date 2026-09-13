@@ -59,7 +59,13 @@ tasks:
       # - cmd: rm -f *.syso
       #   platforms: [linux, darwin]
     vars:
-      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if or .EXTRA_TAGS (eq .OBFUSCATED "true")}}-tags {{if eq .OBFUSCATED "true"}}wails_obfuscated{{if .EXTRA_TAGS}},{{end}}{{end}}{{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l" -ldflags="-X drivewise/backend/sysinfo.AppVersion={{.APP_VERSION}}"{{else}}-tags production{{if eq .OBFUSCATED "true"}},wails_obfuscated{{end}}{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s -H windowsgui -X drivewise/backend/sysinfo.AppVersion={{.APP_VERSION}}"{{end}}'
+      # 注意：生产构建的 -ldflags 里【不能出现 -s】。
+      # 剥离 PE 符号表后（-w -s），这种大体积 Go GUI 产物会被火绒判为
+      # VirTool/Obfuscator.xf -> Trojan/Injector.bhq（病毒ID 6B0A8F391104B5BE），
+      # 在文件落盘瞬间即被删除，属静态误报（详见 docs/误报申诉指引.md）。
+      # 2026-09-12 单变量实测：`-w -s` 判黑、`-s` 判黑、`-w` 干净、不加剥离干净。
+      # 保留 -w（去掉 DWARF，省约 4.3MB，不影响判定），去掉 -s。
+      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if or .EXTRA_TAGS (eq .OBFUSCATED "true")}}-tags {{if eq .OBFUSCATED "true"}}wails_obfuscated{{if .EXTRA_TAGS}},{{end}}{{end}}{{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l" -ldflags="-X drivewise/backend/sysinfo.AppVersion={{.APP_VERSION}}"{{else}}-tags production{{if eq .OBFUSCATED "true"}},wails_obfuscated{{end}}{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -H windowsgui -X drivewise/backend/sysinfo.AppVersion={{.APP_VERSION}}"{{end}}'
     env:
       GOOS: windows
       CGO_ENABLED: '{{.CGO_ENABLED | default "0"}}'

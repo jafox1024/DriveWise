@@ -122,6 +122,7 @@ func TestScanRogueSmoke(t *testing.T) {
 		"registry": true, "startup": true, "service": true, "task": true,
 		"extension": true, "installed": true, "dir": true, "process": true,
 		"shellex": true, "browser": true, "hosts": true, "shortcut": true,
+		"namespace": true,
 	}
 	validActions := map[string]bool{
 		"remove": true, "disable_service": true, "disable_task": true,

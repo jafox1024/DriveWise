@@ -62,7 +62,8 @@ export function RestoreRogue(ids: string[] | null): $CancellablePromise<models$0
  * ScanRogue 扫描流氓/推广软件组件
  * 覆盖：启动项/启动文件夹/服务/计划任务/浏览器扩展/已装软件/黑名单目录/
  *      运行中进程/Shell 扩展注入点/签名黑名单/系统启动劫持点/
- *      浏览器主页与搜索劫持/隐蔽自启点(Userinit 等)/Hosts 劫持/快捷方式参数注入
+ *      浏览器主页与搜索劫持/隐蔽自启点(Userinit 等)/Hosts 劫持/快捷方式参数注入/
+ *      外壳命名空间扩展（此电脑「设备与驱动器」图标、驱动器右键菜单残留）
  */
 export function ScanRogue(): $CancellablePromise<models$0.RogueItem[] | null> {
     return $Call.ByID(2585258155);

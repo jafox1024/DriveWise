@@ -1,15 +1,25 @@
 {
 	"fixed": {
-		"file_version": "0.1.0"
+		"file_version": "0.4.0.0",
+		"product_version": "0.4.0.0",
+		"type": "App"
 	},
 	"info": {
 		"0000": {
-			"ProductVersion": "0.1.0",
-			"CompanyName": "My Company",
-			"FileDescription": "A DriveWise application",
-			"LegalCopyright": "© 2026, My Company",
-			"ProductName": "My Product",
-			"Comments": "This is a comment"
+			"ProductVersion": "0.4.0",
+			"CompanyName": "DriveWise",
+			"FileDescription": "DriveWise - C Drive Cleaner & Analyzer",
+			"LegalCopyright": "Copyright (C) 2026 DriveWise. All rights reserved.",
+			"ProductName": "DriveWise",
+			"Comments": "Disk analyzer, cache cleaner, rogue software remover and app migrator for Windows."
+		},
+		"0804": {
+			"ProductVersion": "0.4.0",
+			"CompanyName": "DriveWise",
+			"FileDescription": "DriveWise C 盘智能清理工具",
+			"LegalCopyright": "版权所有 (C) 2026 DriveWise",
+			"ProductName": "DriveWise",
+			"Comments": "极速磁盘分析 · 缓存清理 · 流氓软件清理 · 软件迁移"
 		}
 	}
 }

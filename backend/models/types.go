@@ -136,7 +136,7 @@ type MigratableApp struct {
 type RogueItem struct {
 	ID          string `json:"id"`          // 唯一 ID（用于清理）
 	Name        string `json:"name"`        // 软件名
-	RuleType    string `json:"ruleType"`    // 匹配类型: registry | file | service | task | extension | installed | startup | process | shellex | browser | hosts | shortcut
+	RuleType    string `json:"ruleType"`    // 匹配类型: registry | file | service | task | extension | installed | startup | process | shellex | browser | hosts | shortcut | namespace
 	Location    string `json:"location"`    // 位置描述
 	Path        string `json:"path"`        // 具体路径/注册表值/服务名/任务名
 	Value       string `json:"value"`       // 注册表值数据/显示名（如有）

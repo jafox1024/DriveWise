@@ -427,7 +427,7 @@ export interface RogueItem {
     "name": string;
 
     /**
-     * 匹配类型: registry | file | service | task | extension | installed | startup | process | shellex | browser | hosts | shortcut
+     * 匹配类型: registry | file | service | task | extension | installed | startup | process | shellex | browser | hosts | shortcut | namespace
      */
     "ruleType": string;
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 
 	"golang.org/x/sys/windows/registry"
 
@@ -191,8 +192,12 @@ func psShortcutRead(paths []string) map[string]shortcutInfo {
 		"}catch{} }; " +
 		"$bytes=[System.Text.Encoding]::UTF8.GetBytes($sb.ToString()); " +
 		"[Console]::Out.WriteLine([Convert]::ToBase64String($bytes))"
+	// 不传 -ExecutionPolicy Bypass：-Command 的命令串本身不受执行策略约束（执行策略
+	// 只拦截 .ps1/.psm1 脚本文件），而 "Bypass" 是国产杀软脚本启发式中的高危特征串，
+	// 去掉可明显降低误报面。此处的 Base64 只是「路径列表」的传输编码（UTF-16LE），
+	// 不是被混淆的代码。
 	out, err := runHiddenOutput("powershell", "-NoProfile", "-NonInteractive",
-		"-ExecutionPolicy", "Bypass", "-Command", script, inEnc)
+		"-Command", script, inEnc)
 	if err != nil {
 		return res
 	}
@@ -224,20 +229,16 @@ func encodePathsForPS(paths []string) string {
 	if len(paths) == 0 {
 		return ""
 	}
-	all := make([]byte, 0, 256)
-	for i, p := range paths {
-		if i > 0 {
-			all = append(all, '\r', '\n')
-		}
-		all = append(all, []byte(p)...)
+	// 用真正的 UTF-16LE 编码（utf16.Encode）——不能把 UTF-8 字节逐个当成 UTF-16 码元，
+	// 否则含中文等非 ASCII 的路径会被 PowerShell 解成乱码，导致这些路径下的 .lnk 扫不到。
+	joined := strings.Join(paths, "\r\n")
+	u := utf16.Encode([]rune(joined))
+	b := make([]byte, len(u)*2)
+	for i, c := range u {
+		b[2*i] = byte(c)
+		b[2*i+1] = byte(c >> 8)
 	}
-	// UTF-16LE 每两个字节编码一个字符
-	u16 := make([]byte, len(all)*2)
-	for i, c := range all {
-		u16[2*i] = c
-		u16[2*i+1] = 0
-	}
-	return base64.StdEncoding.EncodeToString(u16)
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // scanShortcuts 扫描浏览器快捷方式参数注入
@@ -290,7 +291,7 @@ func psShortcutRewrite(lnkPath, newArgs string) error {
 		"$s=(New-Object -ComObject WScript.Shell).CreateShortcut($args[0]); " +
 		"$s.Arguments=$args[1]; $s.Save()"
 	_, err := runHiddenOutput("powershell", "-NoProfile", "-NonInteractive",
-		"-ExecutionPolicy", "Bypass", "-Command", script, lnkPath, newArgs)
+		"-Command", script, lnkPath, newArgs)
 	return err
 }
 

@@ -3,10 +3,6 @@ package sysinfo
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"syscall"
 	"time"
 
 	"drivewise/backend/internal/winutil"
@@ -26,15 +22,10 @@ func (s *SysService) RestartAsAdmin() error {
 	if err != nil {
 		return fmt.Errorf("无法定位程序路径: %w", err)
 	}
-	// PowerShell Start-Process -Verb RunAs 触发 UAC 提权启动
-	ps := fmt.Sprintf(
-		`Start-Process -FilePath '%s' -Verb RunAs -WorkingDirectory '%s'`,
-		strings.ReplaceAll(exe, "'", "''"),
-		strings.ReplaceAll(filepath.Dir(exe), "'", "''"),
-	)
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := cmd.Run(); err != nil {
+	// 原生 ShellExecuteExW + "runas" 谓词触发 UAC（见 elevate_win.go）。
+	// 刻意不走 powershell "Start-Process -Verb RunAs"：该命令行是杀软脚本启发式
+	// 的重点特征串，且额外依赖 powershell 可用性。
+	if err := runAsElevated(exe); err != nil {
 		return fmt.Errorf("提权启动失败（用户可能取消了 UAC 提示）: %w", err)
 	}
 	// 延迟退出，确保响应已返回前端

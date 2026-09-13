@@ -34,6 +34,7 @@ type BackupEntry struct {
 	RegData      string `json:"regData,omitempty"`  // 原值数据（字符串/数字的可读形式）
 	RegKind      uint32 `json:"regKind,omitempty"`  // 原值类型（REG_*，0=旧版备份仅字符串）
 	RegBlob      []byte `json:"regBlob,omitempty"`  // 原值原始字节（按类型原样恢复）
+	RegTree      string `json:"regTree,omitempty"`  // 整棵子树的 JSON 备份（含所有值与子键，用于「删整个键」类清理的原样还原）
 	OrigPath     string `json:"origPath,omitempty"`   // 原文件/目录路径
 	BackedPath   string `json:"backedPath,omitempty"` // 备份后的路径
 	ServiceName  string `json:"serviceName,omitempty"` // 服务名
@@ -60,7 +61,8 @@ var runKeys = []regTarget{
 // ScanRogue 扫描流氓/推广软件组件
 // 覆盖：启动项/启动文件夹/服务/计划任务/浏览器扩展/已装软件/黑名单目录/
 //      运行中进程/Shell 扩展注入点/签名黑名单/系统启动劫持点/
-//      浏览器主页与搜索劫持/隐蔽自启点(Userinit 等)/Hosts 劫持/快捷方式参数注入
+//      浏览器主页与搜索劫持/隐蔽自启点(Userinit 等)/Hosts 劫持/快捷方式参数注入/
+//      外壳命名空间扩展（此电脑「设备与驱动器」图标、驱动器右键菜单残留）
 func (s *RogueService) ScanRogue() []models.RogueItem {
 	items := make([]models.RogueItem, 0, 16)
 	items = append(items, scanRunKeys()...)
@@ -78,6 +80,7 @@ func (s *RogueService) ScanRogue() []models.RogueItem {
 	items = append(items, scanBrowserHijacks()...)
 	items = append(items, scanHosts()...)
 	items = append(items, scanShortcuts()...)
+	items = append(items, scanNamespaceExt()...)
 	return dedupeItems(items)
 }
 
@@ -535,8 +538,8 @@ func cleanRogueItem(item *models.RogueItem, manifest *[]BackupEntry) models.Rogu
 		}
 	}
 	// 其它类型：清理前先结束相关进程（对抗进程注入/文件占用；辅助动作，不单独计结果）。
-	// hosts/快捷方式与运行进程无关联，跳过避免按域名关键词误杀无关进程。
-	if item.RuleType != "hosts" && item.RuleType != "shortcut" {
+	// hosts/快捷方式/命名空间入口与运行进程无关联，跳过避免按显示名关键词误杀无关进程。
+	if item.RuleType != "hosts" && item.RuleType != "shortcut" && item.RuleType != "namespace" {
 		killProcessesForItem(item)
 	}
 
@@ -558,6 +561,13 @@ func cleanRogueItem(item *models.RogueItem, manifest *[]BackupEntry) models.Rogu
 // rogueCleanTargetValid 校验 dir/file/startup 类清理目标确实来自黑名单匹配，
 // 防止外部构造的越权调用把系统/用户关键目录移入隔离区造成误伤。
 func rogueCleanTargetValid(item *models.RogueItem) (bool, string) {
+	// 命名空间/驱动器菜单入口：只允许操作已知扫描根键下的子键（先于类型分流校验）
+	if item.RuleType == "namespace" {
+		if !isKnownNamespacePath(item.Path) {
+			return false, "目标不在已知的命名空间/驱动器菜单范围内，已拒绝"
+		}
+		return true, ""
+	}
 	if item.RuleType != "dir" && item.RuleType != "file" && item.RuleType != "startup" {
 		return true, ""
 	}
@@ -699,6 +709,9 @@ func backupAndClean(item *models.RogueItem) (*BackupEntry, error) {
 		return backupAndDisableTask(item, entry)
 	case "extension", "browser":
 		return backupAndRemoveRegistry(item, entry)
+	case "namespace", "shellex":
+		// 子键（默认值=CLSID/显示名）形态：删除整个子键才能移除该入口
+		return backupAndRemoveKey(item, entry)
 	case "hosts":
 		return backupAndCleanHosts(item, entry)
 	case "shortcut":
@@ -765,9 +778,12 @@ func backupAndRemoveRegistry(item *models.RogueItem, entry *BackupEntry) (*Backu
 	return entry, nil
 }
 
-// backupAndRemoveKey 备份子键默认值并删除整个键
-// 用于 Shell 扩展等以“子键（默认值=CLSID）”形态挂载的注册表项，
-// 与“删除单个值”不同，恢复时需要重建键并写回默认值。
+// backupAndRemoveKey 备份整棵子键子树后递归删除
+// 用于 Shell 扩展/驱动器菜单项等以「子键」形态挂载的注册表项。
+// 注意：这类键常带子键（驱动器右键静态动词的命令就在 Command 子键里），
+// 而 RegDeleteKey 拒绝删除非空键（Access is denied）——这正是「驱动器里的能清理、
+// 右键菜单项删不掉」的原因。故此处改为：整棵子树（所有值+子键，保留类型与字节）备份
+// → 自底向上递归删除 → 复核；恢复时按备份原样重建。
 func backupAndRemoveKey(item *models.RogueItem, entry *BackupEntry) (*BackupEntry, error) {
 	parts := strings.SplitN(item.Path, "\\", 2)
 	if len(parts) != 2 {
@@ -780,20 +796,29 @@ func backupAndRemoveKey(item *models.RogueItem, entry *BackupEntry) (*BackupEntr
 	}
 	keyPath := parts[1]
 
-	k, err := registry.OpenKey(hive, keyPath, registry.QUERY_VALUE)
-	if err != nil {
-		return nil, err
-	}
-	clsid, _, _ := k.GetStringValue("")
-	k.Close()
 	entry.RegHive = hiveName
 	entry.RegKey = keyPath
-	entry.RegValue = "" // 默认值
-	entry.RegKind = registry.SZ
-	entry.RegData = clsid
 
-	if err := registry.DeleteKey(hive, keyPath); err != nil {
-		return nil, err
+	// 1) 整棵子树备份（失败不阻塞清理：至少保证默认值被记下）
+	if tree, terr := dumpKeyTree(hive, keyPath); terr == nil {
+		entry.RegTree = tree
+	}
+	if k, oerr := registry.OpenKey(hive, keyPath, registry.QUERY_VALUE); oerr == nil {
+		def, _, _ := k.GetStringValue("")
+		k.Close()
+		entry.RegValue = "" // 默认值
+		entry.RegKind = registry.SZ
+		entry.RegData = def
+	}
+
+	// 2) 递归删除（先清子键，再删自身）
+	if derr := deleteKeyTree(hive, keyPath); derr != nil {
+		return nil, wrapRegDeleteErr(hiveName, derr)
+	}
+
+	// 3) 复核：仍存在说明被安全软件的自我防护挡下了
+	if _, oerr := registry.OpenKey(hive, keyPath, registry.QUERY_VALUE); oerr == nil {
+		return nil, fmt.Errorf("删除后该注册表项仍然存在：多为安全软件自我防护拦截，请在该软件设置中关闭对应功能（或卸载源头软件）后重试")
 	}
 	return entry, nil
 }
@@ -1036,13 +1061,19 @@ func restoreEntry(id string, manifest *[]BackupEntry) (bool, error) {
 			if e.BackedPath != "" {
 				err = copyFile(e.BackedPath, e.OrigPath)
 			}
-		case "shellex":
-			// 清理时删除的是整个子键：恢复 = 重建键并写回默认值（CLSID）
+		case "shellex", "namespace":
+			// 清理时删除的是整个子键：恢复 = 重建键并写回原内容
 			hive, herr := hiveFromName(e.RegHive)
 			if herr != nil {
 				err = herr
 				break
 			}
+			// 新版备份含整棵子树（如驱动器右键动词的 Command 子键）→ 原样重建
+			if e.RegTree != "" {
+				err = restoreKeyTree(hive, e.RegKey, e.RegTree)
+				break
+			}
+			// 旧版备份仅记默认值：重建键并写回（向后兼容既有 manifest）
 			k, _, cerr := registry.CreateKey(hive, e.RegKey, registry.SET_VALUE)
 			if cerr != nil {
 				err = cerr

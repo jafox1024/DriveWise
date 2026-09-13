@@ -198,7 +198,7 @@ func scanShellEx() []models.RogueItem {
 					Name:      rule.Name,
 					RuleType:  "shellex",
 					Location:  t.desc,
-					Path:      t.path + `\` + sub,
+					Path:      `HKCR\` + t.path + `\` + sub,
 					Value:     dllPath,
 					RiskLevel: "high",
 					Detail:    "Shell 扩展 DLL: " + dllPath,

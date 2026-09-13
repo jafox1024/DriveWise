@@ -42,6 +42,11 @@ export interface BackupEntry {
     "regBlob"?: string | null;
 
     /**
+     * 整棵子树的 JSON 备份（含所有值与子键，用于「删整个键」类清理的原样还原）
+     */
+    "regTree"?: string;
+
+    /**
      * 原文件/目录路径
      */
     "origPath"?: string;

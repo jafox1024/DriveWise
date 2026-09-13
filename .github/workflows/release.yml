@@ -16,6 +16,15 @@
 # 发布产物
 #   - DriveWise-{tag}.exe                    裸可执行文件
 #   - DriveWise-{tag}-windows-amd64.zip      含 exe 与 README 的压缩包
+#
+# 代码签名（可选，强烈建议配置）
+#   未签名的 exe 在用户机器上会触发 SmartScreen 提示，并有一定概率被国产杀软
+#   （火绒 / 360 等）按启发式整体判黑（例：无签名 + 含系统级清理/进程操作特征）。
+#   仓库配置下面两个 Secret 后，本工作流会在打包前自动签名，无需改代码：
+#     - WINDOWS_SIGN_PFX_BASE64    .pfx 证书文件的 Base64（certutil -encode 或
+#                                  PowerShell [Convert]::ToBase64String(ReadAllBytes)）
+#     - WINDOWS_SIGN_PFX_PASSWORD  .pfx 密码
+#   未配置时签名步骤自动跳过，发布流程不受影响。
 
 name: Release
 
@@ -49,6 +58,11 @@ jobs:
   build-and-release:
     name: 打包并发布 (Windows amd64)
     runs-on: windows-latest
+    env:
+      # 证书相关 Secret 会在未配置时展开为空串，签名步骤据此自动跳过。
+      # 注意：必须放在 job 级 env（工作流级 env 不允许引用 secrets）。
+      SIGN_PFX_B64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
+      SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
 
     steps:
       - name: 拉取代码（含全部标签，用于判断版本标签是否已存在）
@@ -111,6 +125,22 @@ jobs:
           ls -la bin/
           test -f bin/drivewise.exe
           echo "构建产物就绪：bin/drivewise.exe"
+
+      - name: 代码签名（可选，配置证书 Secret 后自动生效）
+        if: env.SIGN_PFX_B64 != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'drivewise-sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_B64))
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe 未找到（Windows SDK 缺失）' }
+          & $signtool.FullName sign /f $pfx /p $env:SIGN_PFX_PASSWORD /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 'bin/drivewise.exe'
+          if ($LASTEXITCODE -ne 0) { throw "signtool 签名失败，退出码 $LASTEXITCODE" }
+          Remove-Item $pfx -Force
+          Write-Host '签名完成：bin/drivewise.exe'
 
       - name: 打包发布文件（zip + 裸 exe）
         shell: pwsh

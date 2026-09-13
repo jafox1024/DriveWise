@@ -1,15 +1,39 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  DriveWise 应用程序清单。
+
+  说明：wails3 generate syso 会用 winres 解析本文件，并按其内部模板重新生成清单，
+  因此这里只声明需要的项（未被识别的元素会被忽略，不会报错）：
+    - assemblyIdentity：程序标识与版本（体现在 PE 的 side-by-side 信息中）；
+    - dependency：Common Controls v6，保证原生控件使用现代主题外观；
+    - compatibility：声明支持的最低系统（Win8 / 8.1 / 10 / 11）；
+    - dpiAware / dpiAwareness：高分屏 per-monitor v2 缩放；
+    - longPathAware：允许超过 MAX_PATH 的长路径（清理工具常遇到深层目录）；
+    - trustInfo：asInvoker（默认不提权；需要管理员的功能由程序内按钮触发 UAC）。
+-->
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
-    <assemblyIdentity type="win32" name="com.DriveWise.drivewise" version="0.1.0" processorArchitecture="*"/>
+    <assemblyIdentity type="win32" name="com.drivewise.app" version="0.4.0.0" processorArchitecture="*"/>
+    <description>DriveWise C 盘智能清理工具</description>
     <dependency>
         <dependentAssembly>
             <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
         </dependentAssembly>
     </dependency>
+    <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+        <application>
+            <!-- Windows 10 / Windows 11 -->
+            <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+            <!-- Windows 8.1 -->
+            <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+            <!-- Windows 8 -->
+            <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
+        </application>
+    </compatibility>
     <asmv3:application>
         <asmv3:windowsSettings>
             <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware> <!-- fallback for Windows 7 and 8 -->
             <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness> <!-- falls back to per-monitor if per-monitor v2 is not supported -->
+            <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
         </asmv3:windowsSettings>
     </asmv3:application>
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">

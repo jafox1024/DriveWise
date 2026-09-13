@@ -2,18 +2,15 @@ package analyzer
 
 import (
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"drivewise/backend/internal/fsutil"
 )
 
-// 说明：OpenInExplorer 的健壮实现（ShellExecuteW + Medium IL 降权回退）见
-// open_explorer_win.go。
+// 说明：OpenInExplorer 的健壮实现（ShellExecuteW 主路径 + explorer 直启兜底）见
+// open_explorer_win.go；sendToRecycleBin 的 Shell 原生实现见 recycle_win.go。
 
 // DeletePath 将文件/目录移入回收站（非永久删除）。
 // 安全保护：禁止删除磁盘根目录与系统关键目录；返回被删除对象的占用空间。
@@ -64,32 +61,4 @@ func blockedPath(abs string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// sendToRecycleBin 将路径移入回收站（通过 PowerShell Microsoft.VisualBasic API）
-// 注：PowerShell 5.1 的 DeleteFile 删除成功后可能误报“找不到文件”，
-// 以原路径是否消失作为成功判据（文件确实已进入回收站）。
-func sendToRecycleBin(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	method := "DeleteFile"
-	if info.IsDir() {
-		method = "DeleteDirectory"
-	}
-	escaped := strings.ReplaceAll(path, "'", "''")
-	ps := fmt.Sprintf(
-		`Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::%s('%s','OnlyErrorDialogs','SendToRecycleBin')`,
-		method, escaped,
-	)
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	_, _ = cmd.CombinedOutput()
-
-	// 验证：原路径已不存在 = 成功进入回收站
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		return nil
-	}
-	return fmt.Errorf("移入回收站失败，路径仍存在: %s", path)
 }

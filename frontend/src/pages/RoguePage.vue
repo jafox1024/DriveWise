@@ -44,7 +44,12 @@ const adminRuleTypes = new Set(["service", "task", "shellex", "dir", "hosts"]);
 /** 需管理员判断：类型命中，或注册表路径在 HKLM/HKCR（写系统配置需提权） */
 function needsAdmin(item: RogueItem): boolean {
   if (adminRuleTypes.has(item.ruleType)) return true;
-  if (item.ruleType === "registry" || item.ruleType === "extension" || item.ruleType === "browser") {
+  if (
+    item.ruleType === "registry" ||
+    item.ruleType === "extension" ||
+    item.ruleType === "browser" ||
+    item.ruleType === "namespace"
+  ) {
     const p = item.path || "";
     if (p.startsWith("HKLM") || p.startsWith("HKCR")) return true;
   }
@@ -72,6 +77,11 @@ async function restartAsAdmin() {
     message.value = { type: "err", text: `提权重启失败：${String(e)}` };
   }
 }
+
+/** 清理失败且原因是权限/提权时，直接在提示条里给一键提权重启（与缓存清理页一致） */
+const needAdminRetry = computed(
+  () => message.value?.type === "err" && /管理员|权限不足/.test(message.value.text),
+);
 
 onMounted(async () => {
   try {
@@ -336,7 +346,17 @@ async function restore(id: string) {
       class="mb-5 rounded-xl border p-4 text-sm shadow-sm"
       :class="message.type === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'"
     >
-      {{ message.text }}
+      <div class="flex flex-wrap items-center gap-3">
+        <span class="min-w-0 flex-1">{{ message.text }}</span>
+        <button
+          v-if="needAdminRetry"
+          class="shrink-0 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="restarting"
+          @click="restartAsAdmin"
+        >
+          {{ restarting ? "正在提权..." : "以管理员身份重启后重试" }}
+        </button>
+      </div>
     </div>
 
     <!-- 恢复记录 -->
@@ -358,6 +378,7 @@ async function restore(id: string) {
               <template v-if="b.ruleType === 'service'">服务：{{ b.serviceName }}</template>
               <template v-else-if="b.ruleType === 'task'">计划任务：{{ b.taskName }}</template>
               <template v-else-if="b.ruleType === 'registry' || b.ruleType === 'extension' || b.ruleType === 'browser'">{{ b.regHive }}\{{ b.regKey }}\{{ b.regValue }}</template>
+              <template v-else-if="b.ruleType === 'namespace' || b.ruleType === 'shellex'">注册表项：{{ b.regHive }}\{{ b.regKey }}<template v-if="b.regData"> （原值 {{ b.regData }}）</template></template>
               <template v-else>{{ b.origPath }}</template>
             </div>
           </div>
